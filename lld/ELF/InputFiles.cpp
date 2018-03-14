@@ -1245,9 +1245,7 @@ template <class ELFT> void SharedFile::parse() {
     }
 
     if (Sym.isUndefined()) {
-      Symbol *S = Symtab->addSymbol(
-          Undefined{this, Name, Sym.getBinding(), Sym.st_other, Sym.getType()});
-      S->ExportDynamic = true;
+      this->Undefs.insert(Name);
       continue;
     }
 
