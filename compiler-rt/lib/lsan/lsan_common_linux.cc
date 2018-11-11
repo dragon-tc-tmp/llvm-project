@@ -31,11 +31,7 @@ static char linker_placeholder[sizeof(LoadedModule)] ALIGNED(64);
 static LoadedModule *linker = nullptr;
 
 static bool IsLinker(const LoadedModule& module) {
-#if SANITIZER_USE_GETAUXVAL
-  return module.base_address() == getauxval(AT_BASE);
-#else
   return LibraryNameIs(module.full_name(), kLinkerName);
-#endif  // SANITIZER_USE_GETAUXVAL
 }
 
 __attribute__((tls_model("initial-exec")))
