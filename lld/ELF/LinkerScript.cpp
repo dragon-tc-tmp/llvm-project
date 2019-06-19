@@ -417,16 +417,16 @@ LinkerScript::computeInputSections(const InputSectionDescription *Cmd) {
 
 void LinkerScript::discard(ArrayRef<InputSection *> V) {
   for (InputSection *S : V) {
-    if (S == In.ShStrTab || S == In.RelaDyn || S == In.RelrDyn)
+    if (S == In.ShStrTab || S == Main->RelaDyn || S == Main->RelrDyn)
       error("discarding " + S->Name + " section is not allowed");
 
     // You can discard .hash and .gnu.hash sections by linker scripts. Since
     // they are synthesized sections, we need to handle them differently than
     // other regular sections.
-    if (S == In.GnuHashTab)
-      In.GnuHashTab = nullptr;
-    if (S == In.HashTab)
-      In.HashTab = nullptr;
+    if (S == Main->GnuHashTab)
+      Main->GnuHashTab = nullptr;
+    if (S == Main->HashTab)
+      Main->HashTab = nullptr;
 
     S->Assigned = false;
     S->markDead();
@@ -485,7 +485,6 @@ void LinkerScript::processSectionCommands() {
       if (Sec->Name == "/DISCARD/") {
         discard(V);
         Sec->SectionCommands.clear();
-        Sec->SectionIndex = 0; // Not an orphan.
         continue;
       }
 
@@ -894,10 +893,9 @@ void LinkerScript::adjustSectionsBeforeSorting() {
       Sec->Alignment =
           std::max<uint32_t>(Sec->Alignment, Sec->AlignExpr().getValue());
 
-    // A live output section means that some input section was added to it. It
-    // might have been removed (if it was empty synthetic section), but we at
-    // least know the flags.
-    if (Sec->isLive())
+    // The input section might have been removed (if it was an empty synthetic
+    // section), but we at least know the flags.
+    if (Sec->HasInputSections)
       Flags = Sec->Flags;
 
     // We do not want to keep any special flags for output section
@@ -910,6 +908,8 @@ void LinkerScript::adjustSectionsBeforeSorting() {
     if (IsEmpty && isDiscardable(*Sec)) {
       Sec->markDead();
       Cmd = nullptr;
+    } else if (!Sec->isLive()) {
+      Sec->markLive();
     }
   }
 

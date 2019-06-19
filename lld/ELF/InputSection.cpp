@@ -412,7 +412,8 @@ void InputSection::copyRelocations(uint8_t *Buf, ArrayRef<RelTy> Rels) {
 
   for (const RelTy &Rel : Rels) {
     RelType Type = Rel.getType(Config->IsMips64EL);
-    Symbol &Sym = getFile<ELFT>()->getRelocTargetSym(Rel);
+    const ObjFile<ELFT> *File = getFile<ELFT>();
+    Symbol &Sym = File->getRelocTargetSym(Rel);
 
     auto *P = reinterpret_cast<typename ELFT::Rela *>(Buf);
     Buf += sizeof(RelTy);
@@ -435,10 +436,22 @@ void InputSection::copyRelocations(uint8_t *Buf, ArrayRef<RelTy> Rels) {
       // .eh_frame is horribly special and can reference discarded sections. To
       // avoid having to parse and recreate .eh_frame, we just replace any
       // relocation in it pointing to discarded sections with R_*_NONE, which
-      // hopefully creates a frame that is ignored at runtime.
+      // hopefully creates a frame that is ignored at runtime. Also, don't warn
+      // on .gcc_except_table and debug sections.
+      //
+      // See the comment in maybeReportUndefined for PPC64 .toc .
       auto *D = dyn_cast<Defined>(&Sym);
       if (!D) {
-        warn("STT_SECTION symbol should be defined");
+        if (!Sec->Name.startswith(".debug") &&
+            !Sec->Name.startswith(".zdebug") && Sec->Name != ".eh_frame" &&
+            Sec->Name != ".gcc_except_table" && Sec->Name != ".toc") {
+          uint32_t SecIdx = cast<Undefined>(Sym).DiscardedSecIdx;
+          Elf_Shdr_Impl<ELFT> Sec =
+              CHECK(File->getObj().sections(), File)[SecIdx];
+          warn("relocation refers to a discarded section: " +
+               CHECK(File->getObj().getSectionName(&Sec), File) +
+               "\n>>> referenced by " + getObjMsg(P->r_offset));
+        }
         P->setSymbolAndType(0, 0, false);
         continue;
       }
@@ -600,6 +613,7 @@ static int64_t getTlsTpOffset(const Symbol &S) {
   case EM_X86_64:
     // Variant 2. The TLS segment is located just before the thread pointer.
     return S.getVA(0) - alignTo(Out::TlsPhdr->p_memsz, Out::TlsPhdr->p_align);
+  case EM_PPC:
   case EM_PPC64:
     // The thread pointer points to a fixed offset from the start of the
     // executable's TLS segment. An offset of 0x7000 allows a signed 16-bit
@@ -618,6 +632,7 @@ static uint64_t getRelocTargetVA(const InputFile *File, RelType Type, int64_t A,
   case R_DTPREL:
   case R_RELAX_TLS_LD_TO_LE_ABS:
   case R_RELAX_GOT_PC_NOPIC:
+  case R_RISCV_ADD:
     return Sym.getVA(A);
   case R_ADDEND:
     return A;
@@ -707,6 +722,8 @@ static uint64_t getRelocTargetVA(const InputFile *File, RelType Type, int64_t A,
         Dest = getARMUndefinedRelativeWeakVA(Type, A, P);
       else if (Config->EMachine == EM_AARCH64)
         Dest = getAArch64UndefinedRelativeWeakVA(Type, A, P);
+      else if (Config->EMachine == EM_PPC)
+        Dest = P;
       else
         Dest = Sym.getVA(A);
     } else {
@@ -717,9 +734,14 @@ static uint64_t getRelocTargetVA(const InputFile *File, RelType Type, int64_t A,
   case R_PLT:
     return Sym.getPltVA() + A;
   case R_PLT_PC:
-  case R_PPC_CALL_PLT:
+  case R_PPC64_CALL_PLT:
     return Sym.getPltVA() + A - P;
-  case R_PPC_CALL: {
+  case R_PPC32_PLTREL:
+    // R_PPC_PLTREL24 uses the addend (usually 0 or 0x8000) to indicate r30
+    // stores _GLOBAL_OFFSET_TABLE_ or .got2+0x8000. The addend is ignored for
+    // target VA compuation.
+    return Sym.getPltVA() - P;
+  case R_PPC64_CALL: {
     uint64_t SymVA = Sym.getVA(A);
     // If we have an undefined weak symbol, we might get here with a symbol
     // address of zero. That could overflow, but the code must be unreachable,
@@ -735,7 +757,7 @@ static uint64_t getRelocTargetVA(const InputFile *File, RelType Type, int64_t A,
     // branching to the local entry point.
     return SymVA - P + getPPC64GlobalEntryToLocalEntryOffset(Sym.StOther);
   }
-  case R_PPC_TOC:
+  case R_PPC64_TOCBASE:
     return getPPC64TocBase() + A;
   case R_RELAX_GOT_PC:
     return Sym.getVA(A) - P;
@@ -922,7 +944,7 @@ void InputSectionBase::relocateAlloc(uint8_t *Buf, uint8_t *BufEnd) {
     case R_RELAX_TLS_GD_TO_IE_GOTPLT:
       Target->relaxTlsGdToIe(BufLoc, Type, TargetVA);
       break;
-    case R_PPC_CALL:
+    case R_PPC64_CALL:
       // If this is a call to __tls_get_addr, it may be part of a TLS
       // sequence that has been relaxed and turned into a nop. In this
       // case, we don't want to handle it as a call.

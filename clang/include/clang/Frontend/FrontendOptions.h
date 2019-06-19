@@ -128,7 +128,10 @@ enum ActionKind {
   MigrateSource,
 
   /// Just lex, no output.
-  RunPreprocessorOnly
+  RunPreprocessorOnly,
+
+  /// Print the output of the dependency directives source minimizer.
+  PrintDependencyDirectivesSourceMinimizerOutput
 };
 
 } // namespace frontend
@@ -256,6 +259,9 @@ public:
 
   /// Show timers for individual actions.
   unsigned ShowTimers : 1;
+
+  /// print the supported cpus for the current target
+  unsigned PrintSupportedCPUs : 1;
 
   /// Output time trace profile.
   unsigned TimeTrace : 1;

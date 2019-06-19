@@ -43,7 +43,6 @@
 #include "lldb/Symbol/Symbol.h"
 #include "lldb/Target/Language.h"
 #include "lldb/Target/LanguageRuntime.h"
-#include "lldb/Target/ObjCLanguageRuntime.h"
 #include "lldb/Target/Process.h"
 #include "lldb/Target/SectionLoadList.h"
 #include "lldb/Target/StackFrame.h"
@@ -57,6 +56,8 @@
 #include "lldb/Utility/State.h"
 #include "lldb/Utility/StreamString.h"
 #include "lldb/Utility/Timer.h"
+
+#include "llvm/ADT/ScopeExit.h"
 
 #include <memory>
 #include <mutex>
@@ -1668,11 +1669,8 @@ void Target::ModulesDidLoad(ModuleList &module_list) {
 void Target::SymbolsDidLoad(ModuleList &module_list) {
   if (m_valid && module_list.GetSize()) {
     if (m_process_sp) {
-      LanguageRuntime *runtime =
-          m_process_sp->GetLanguageRuntime(lldb::eLanguageTypeObjC);
-      if (runtime) {
-        ObjCLanguageRuntime *objc_runtime = (ObjCLanguageRuntime *)runtime;
-        objc_runtime->SymbolsDidLoad(module_list);
+      for (LanguageRuntime *runtime : m_process_sp->GetLanguageRuntimes()) {
+        runtime->SymbolsDidLoad(module_list);
       }
     }
 
@@ -2384,10 +2382,11 @@ ExpressionResults Target::EvaluateExpression(
   if (expr.empty())
     return execution_results;
 
-  // We shouldn't run stop hooks in expressions. Be sure to reset this if you
-  // return anywhere within this function.
+  // We shouldn't run stop hooks in expressions.
   bool old_suppress_value = m_suppress_stop_hooks;
   m_suppress_stop_hooks = true;
+  auto on_exit = llvm::make_scope_exit([this, old_suppress_value]() {
+      m_suppress_stop_hooks = old_suppress_value; });
 
   ExecutionContext exe_ctx;
 
@@ -2420,8 +2419,6 @@ ExpressionResults Target::EvaluateExpression(
                                  nullptr, // Module
                                  ctx_obj);
   }
-
-  m_suppress_stop_hooks = old_suppress_value;
 
   return execution_results;
 }
