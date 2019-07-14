@@ -9,6 +9,8 @@
 #include "llvm/Bitcode/BitcodeAnalyzer.h"
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/Bitcode/LLVMBitCodes.h"
+#include "llvm/Bitstream/BitCodes.h"
+#include "llvm/Bitstream/BitstreamReader.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/SHA1.h"
 
@@ -546,11 +548,9 @@ Error BitcodeAnalyzer::analyze(Optional<BCDumpOptions> O,
   // The block info must be a top-level block.
   if (BlockInfoStream) {
     BitstreamCursor BlockInfoCursor(*BlockInfoStream);
-    CurStreamTypeType BlockInfoStreamType;
     Expected<CurStreamTypeType> H = analyzeHeader(O, BlockInfoCursor);
     if (!H)
       return H.takeError();
-    BlockInfoStreamType = *H;
 
     while (!BlockInfoCursor.AtEndOfStream()) {
       Expected<unsigned> MaybeCode = BlockInfoCursor.ReadCode();
