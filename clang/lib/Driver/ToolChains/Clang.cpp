@@ -22,6 +22,7 @@
 #include "InputInfo.h"
 #include "PS4CPU.h"
 #include "clang/Basic/CharInfo.h"
+#include "clang/Basic/CodeGenOptions.h"
 #include "clang/Basic/LangOptions.h"
 #include "clang/Basic/ObjCRuntime.h"
 #include "clang/Basic/Version.h"
@@ -501,8 +502,6 @@ static codegenoptions::DebugInfoKind DebugLevelToInfoKind(const Arg &A) {
   return codegenoptions::LimitedDebugInfo;
 }
 
-enum class FramePointerKind { None, NonLeaf, All };
-
 static bool mustUseNonLeafFramePointerForTarget(const llvm::Triple &Triple) {
   switch (Triple.getArch()){
   default:
@@ -579,8 +578,8 @@ static bool useFramePointerForTargetByDefault(const ArgList &Args,
   return true;
 }
 
-static FramePointerKind getFramePointerKind(const ArgList &Args,
-                                            const llvm::Triple &Triple) {
+static CodeGenOptions::FramePointerKind
+getFramePointerKind(const ArgList &Args, const llvm::Triple &Triple) {
   Arg *A = Args.getLastArg(options::OPT_fomit_frame_pointer,
                            options::OPT_fno_omit_frame_pointer);
   bool OmitFP = A && A->getOption().matches(options::OPT_fomit_frame_pointer);
@@ -591,10 +590,10 @@ static FramePointerKind getFramePointerKind(const ArgList &Args,
     if (Args.hasFlag(options::OPT_momit_leaf_frame_pointer,
                      options::OPT_mno_omit_leaf_frame_pointer,
                      Triple.isPS4CPU()))
-      return FramePointerKind::NonLeaf;
-    return FramePointerKind::All;
+      return CodeGenOptions::FramePointerKind::NonLeaf;
+    return CodeGenOptions::FramePointerKind::All;
   }
-  return FramePointerKind::None;
+  return CodeGenOptions::FramePointerKind::None;
 }
 
 /// Add a CC1 option to specify the debug compilation directory.
@@ -1803,12 +1802,21 @@ void Clang::AddPPCTargetArgs(const ArgList &Args,
       break;
     }
 
-  if (Arg *A = Args.getLastArg(options::OPT_mabi_EQ))
-    // The ppc64 linux abis are all "altivec" abis by default. Accept and ignore
-    // the option if given as we don't have backend support for any targets
-    // that don't use the altivec abi.
-    if (StringRef(A->getValue()) != "altivec")
+  bool IEEELongDouble = false;
+  for (const Arg *A : Args.filtered(options::OPT_mabi_EQ)) {
+    StringRef V = A->getValue();
+    if (V == "ieeelongdouble")
+      IEEELongDouble = true;
+    else if (V == "ibmlongdouble")
+      IEEELongDouble = false;
+    else if (V != "altivec")
+      // The ppc64 linux abis are all "altivec" abis by default. Accept and ignore
+      // the option if given as we don't have backend support for any targets
+      // that don't use the altivec abi.
       ABIName = A->getValue();
+  }
+  if (IEEELongDouble)
+    CmdArgs.push_back("-mabi=ieeelongdouble");
 
   ppc::FloatABI FloatABI =
       ppc::getPPCFloatABI(getToolChain().getDriver(), Args);
@@ -2962,7 +2970,7 @@ static void RenderObjCOptions(const ToolChain &TC, const Driver &D,
     // We default off for Objective-C, on for Objective-C++.
     if (Args.hasFlag(options::OPT_fobjc_arc_exceptions,
                      options::OPT_fno_objc_arc_exceptions,
-                     /*default=*/types::isCXX(Input.getType())))
+                     /*Default=*/types::isCXX(Input.getType())))
       CmdArgs.push_back("-fobjc-arc-exceptions");
   }
 
@@ -3638,8 +3646,7 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
 
   if (const Arg *A = Args.getLastArg(options::OPT_fthinlto_index_EQ)) {
     if (!types::isLLVMIR(Input.getType()))
-      D.Diag(diag::err_drv_argument_only_allowed_with) << A->getAsString(Args)
-                                                       << "-x ir";
+      D.Diag(diag::err_drv_arg_requires_bitcode_input) << A->getAsString(Args);
     Args.AddLastArg(CmdArgs, options::OPT_fthinlto_index_EQ);
   }
 
@@ -3938,12 +3945,23 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   if (Args.hasFlag(options::OPT_mrtd, options::OPT_mno_rtd, false))
     CmdArgs.push_back("-fdefault-calling-conv=stdcall");
 
-  FramePointerKind FPKeepKind = getFramePointerKind(Args, RawTriple);
-  if (FPKeepKind != FramePointerKind::None) {
-    CmdArgs.push_back("-mdisable-fp-elim");
-    if (FPKeepKind == FramePointerKind::NonLeaf)
-      CmdArgs.push_back("-momit-leaf-frame-pointer");
+  CodeGenOptions::FramePointerKind FPKeepKind =
+                  getFramePointerKind(Args, RawTriple);
+  const char *FPKeepKindStr = nullptr;
+  switch (FPKeepKind) {
+  case CodeGenOptions::FramePointerKind::None:
+    FPKeepKindStr = "-mframe-pointer=none";
+    break;
+  case CodeGenOptions::FramePointerKind::NonLeaf:
+    FPKeepKindStr = "-mframe-pointer=non-leaf";
+    break;
+  case CodeGenOptions::FramePointerKind::All:
+    FPKeepKindStr = "-mframe-pointer=all";
+    break;
   }
+  assert(FPKeepKindStr && "unknown FramePointerKind");
+  CmdArgs.push_back(FPKeepKindStr);
+
   if (!Args.hasFlag(options::OPT_fzero_initialized_in_bss,
                     options::OPT_fno_zero_initialized_in_bss))
     CmdArgs.push_back("-mno-zero-initialized-in-bss");
@@ -4741,7 +4759,6 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   if (!Args.hasFlag(
           options::OPT_fuse_cxa_atexit, options::OPT_fno_use_cxa_atexit,
           !RawTriple.isOSWindows() &&
-              RawTriple.getOS() != llvm::Triple::Solaris &&
               TC.getArch() != llvm::Triple::xcore &&
               ((RawTriple.getVendor() != llvm::Triple::MipsTechnologies) ||
                RawTriple.hasEnvironment())) ||
@@ -5482,7 +5499,7 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   }
 
   if (Arg *A = Args.getLastArg(options::OPT_pg))
-    if (FPKeepKind == FramePointerKind::None)
+    if (FPKeepKind == CodeGenOptions::FramePointerKind::None)
       D.Diag(diag::err_drv_argument_not_allowed_with) << "-fomit-frame-pointer"
                                                       << A->getAsString(Args);
 
@@ -5694,7 +5711,7 @@ static EHFlags parseClangCLEHFlags(const Driver &D, const ArgList &Args) {
   // The default is that /GX is not specified.
   if (EHArgs.empty() &&
       Args.hasFlag(options::OPT__SLASH_GX, options::OPT__SLASH_GX_,
-                   /*default=*/false)) {
+                   /*Default=*/false)) {
     EH.Synch = true;
     EH.NoUnwindC = true;
   }
@@ -5763,13 +5780,13 @@ void Clang::AddClangCLArgs(const ArgList &Args, types::ID InputType,
 
   // This controls whether or not we emit RTTI data for polymorphic types.
   if (Args.hasFlag(options::OPT__SLASH_GR_, options::OPT__SLASH_GR,
-                   /*default=*/false))
+                   /*Default=*/false))
     CmdArgs.push_back("-fno-rtti-data");
 
   // This controls whether or not we emit stack-protector instrumentation.
   // In MSVC, Buffer Security Check (/GS) is on by default.
   if (Args.hasFlag(options::OPT__SLASH_GS, options::OPT__SLASH_GS_,
-                   /*default=*/true)) {
+                   /*Default=*/true)) {
     CmdArgs.push_back("-stack-protector");
     CmdArgs.push_back(Args.MakeArgString(Twine(LangOptions::SSPStrong)));
   }

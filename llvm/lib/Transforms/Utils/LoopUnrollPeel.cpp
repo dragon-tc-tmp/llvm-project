@@ -61,6 +61,10 @@ static cl::opt<unsigned> UnrollForcePeelCount(
     "unroll-force-peel-count", cl::init(0), cl::Hidden,
     cl::desc("Force a peel count regardless of profiling information."));
 
+static cl::opt<bool> UnrollPeelMultiDeoptExit(
+    "unroll-peel-multi-deopt-exit", cl::init(true), cl::Hidden,
+    cl::desc("Allow peeling of loops with multiple deopt exits."));
+
 // Designates that a Phi is estimated to become invariant after an "infinite"
 // number of loop iterations (i.e. only may become an invariant if the loop is
 // fully unrolled).
@@ -72,6 +76,22 @@ bool llvm::canPeel(Loop *L) {
   // Make sure the loop is in simplified form
   if (!L->isLoopSimplifyForm())
     return false;
+
+  if (UnrollPeelMultiDeoptExit) {
+    SmallVector<BasicBlock *, 4> Exits;
+    L->getUniqueNonLatchExitBlocks(Exits);
+
+    if (!Exits.empty()) {
+      // Latch's terminator is a conditional branch, Latch is exiting and
+      // all non Latch exits ends up with deoptimize.
+      const BasicBlock *Latch = L->getLoopLatch();
+      const BranchInst *T = dyn_cast<BranchInst>(Latch->getTerminator());
+      return T && T->isConditional() && L->isLoopExiting(Latch) &&
+             all_of(Exits, [](const BasicBlock *BB) {
+               return BB->getTerminatingDeoptimizeCall();
+             });
+    }
+  }
 
   // Only peel loops that contain a single exit
   if (!L->getExitingBlock() || !L->getUniqueExitBlock())
@@ -344,88 +364,78 @@ void llvm::computePeelCount(Loop *L, unsigned LoopSize,
 /// iteration.
 /// This sets the branch weights for the latch of the recently peeled off loop
 /// iteration correctly.
-/// Our goal is to make sure that:
-/// a) The total weight of all the copies of the loop body is preserved.
-/// b) The total weight of the loop exit is preserved.
-/// c) The body weight is reasonably distributed between the peeled iterations.
+/// Let F is a weight of the edge from latch to header.
+/// Let E is a weight of the edge from latch to exit.
+/// F/(F+E) is a probability to go to loop and E/(F+E) is a probability to
+/// go to exit.
+/// Then, Estimated TripCount = F / E.
+/// For I-th (counting from 0) peeled off iteration we set the the weights for
+/// the peeled latch as (TC - I, 1). It gives us reasonable distribution,
+/// The probability to go to exit 1/(TC-I) increases. At the same time
+/// the estimated trip count of remaining loop reduces by I.
+/// To avoid dealing with division rounding we can just multiple both part
+/// of weights to E and use weight as (F - I * E, E).
 ///
 /// \param Header The copy of the header block that belongs to next iteration.
 /// \param LatchBR The copy of the latch branch that belongs to this iteration.
-/// \param IterNumber The serial number of the iteration that was just
-/// peeled off.
-/// \param AvgIters The average number of iterations we expect the loop to have.
-/// \param[in,out] PeeledHeaderWeight The total number of dynamic loop
-/// iterations that are unaccounted for. As an input, it represents the number
-/// of times we expect to enter the header of the iteration currently being
-/// peeled off. The output is the number of times we expect to enter the
-/// header of the next iteration.
+/// \param[in,out] FallThroughWeight The weight of the edge from latch to
+/// header before peeling (in) and after peeled off one iteration (out).
 static void updateBranchWeights(BasicBlock *Header, BranchInst *LatchBR,
-                                unsigned IterNumber, unsigned AvgIters,
-                                uint64_t &PeeledHeaderWeight) {
-  // FIXME: Pick a more realistic distribution.
-  // Currently the proportion of weight we assign to the fall-through
-  // side of the branch drops linearly with the iteration number, and we use
-  // a 0.9 fudge factor to make the drop-off less sharp...
-  if (PeeledHeaderWeight) {
-    uint64_t FallThruWeight =
-        PeeledHeaderWeight * ((float)(AvgIters - IterNumber) / AvgIters * 0.9);
-    uint64_t ExitWeight = PeeledHeaderWeight - FallThruWeight;
-    PeeledHeaderWeight -= ExitWeight;
+                                uint64_t ExitWeight,
+                                uint64_t &FallThroughWeight) {
+  // FallThroughWeight is 0 means that there is no branch weights on original
+  // latch block or estimated trip count is zero.
+  if (!FallThroughWeight)
+    return;
 
-    unsigned HeaderIdx = (LatchBR->getSuccessor(0) == Header ? 0 : 1);
-    MDBuilder MDB(LatchBR->getContext());
-    MDNode *WeightNode =
-        HeaderIdx ? MDB.createBranchWeights(ExitWeight, FallThruWeight)
-                  : MDB.createBranchWeights(FallThruWeight, ExitWeight);
-    LatchBR->setMetadata(LLVMContext::MD_prof, WeightNode);
-  }
+  unsigned HeaderIdx = (LatchBR->getSuccessor(0) == Header ? 0 : 1);
+  MDBuilder MDB(LatchBR->getContext());
+  MDNode *WeightNode =
+      HeaderIdx ? MDB.createBranchWeights(ExitWeight, FallThroughWeight)
+                : MDB.createBranchWeights(FallThroughWeight, ExitWeight);
+  LatchBR->setMetadata(LLVMContext::MD_prof, WeightNode);
+  FallThroughWeight =
+      FallThroughWeight > ExitWeight ? FallThroughWeight - ExitWeight : 1;
 }
 
 /// Initialize the weights.
 ///
 /// \param Header The header block.
 /// \param LatchBR The latch branch.
-/// \param AvgIters The average number of iterations we expect the loop to have.
-/// \param[out] ExitWeight The # of times the edge from Latch to Exit is taken.
-/// \param[out] CurHeaderWeight The # of times the header is executed.
+/// \param[out] ExitWeight The weight of the edge from Latch to Exit.
+/// \param[out] FallThroughWeight The weight of the edge from Latch to Header.
 static void initBranchWeights(BasicBlock *Header, BranchInst *LatchBR,
-                              unsigned AvgIters, uint64_t &ExitWeight,
-                              uint64_t &CurHeaderWeight) {
+                              uint64_t &ExitWeight,
+                              uint64_t &FallThroughWeight) {
   uint64_t TrueWeight, FalseWeight;
   if (!LatchBR->extractProfMetadata(TrueWeight, FalseWeight))
     return;
   unsigned HeaderIdx = LatchBR->getSuccessor(0) == Header ? 0 : 1;
   ExitWeight = HeaderIdx ? TrueWeight : FalseWeight;
-  // The # of times the loop body executes is the sum of the exit block
-  // is taken and the # of times the backedges are taken.
-  CurHeaderWeight = TrueWeight + FalseWeight;
+  FallThroughWeight = HeaderIdx ? FalseWeight : TrueWeight;
 }
 
 /// Update the weights of original Latch block after peeling off all iterations.
 ///
 /// \param Header The header block.
 /// \param LatchBR The latch branch.
-/// \param ExitWeight The weight of the edge from Latch to Exit block.
-/// \param CurHeaderWeight The # of time the header is executed.
+/// \param ExitWeight The weight of the edge from Latch to Exit.
+/// \param FallThroughWeight The weight of the edge from Latch to Header.
 static void fixupBranchWeights(BasicBlock *Header, BranchInst *LatchBR,
-                               uint64_t ExitWeight, uint64_t CurHeaderWeight) {
-  // Adjust the branch weights on the loop exit.
-  if (ExitWeight) {
-    // The backedge count is the difference of current header weight and
-    // current loop exit weight. If the current header weight is smaller than
-    // the current loop exit weight, we mark the loop backedge weight as 1.
-    uint64_t BackEdgeWeight = 0;
-    if (ExitWeight < CurHeaderWeight)
-      BackEdgeWeight = CurHeaderWeight - ExitWeight;
-    else
-      BackEdgeWeight = 1;
-    MDBuilder MDB(LatchBR->getContext());
-    unsigned HeaderIdx = LatchBR->getSuccessor(0) == Header ? 0 : 1;
-    MDNode *WeightNode =
-        HeaderIdx ? MDB.createBranchWeights(ExitWeight, BackEdgeWeight)
-                  : MDB.createBranchWeights(BackEdgeWeight, ExitWeight);
-    LatchBR->setMetadata(LLVMContext::MD_prof, WeightNode);
-  }
+                               uint64_t ExitWeight,
+                               uint64_t FallThroughWeight) {
+  // FallThroughWeight is 0 means that there is no branch weights on original
+  // latch block or estimated trip count is zero.
+  if (!FallThroughWeight)
+    return;
+
+  // Sets the branch weights on the loop exit.
+  MDBuilder MDB(LatchBR->getContext());
+  unsigned HeaderIdx = LatchBR->getSuccessor(0) == Header ? 0 : 1;
+  MDNode *WeightNode =
+      HeaderIdx ? MDB.createBranchWeights(ExitWeight, FallThroughWeight)
+                : MDB.createBranchWeights(FallThroughWeight, ExitWeight);
+  LatchBR->setMetadata(LLVMContext::MD_prof, WeightNode);
 }
 
 /// Clones the body of the loop L, putting it between \p InsertTop and \p
@@ -563,6 +573,18 @@ bool llvm::peelLoop(Loop *L, unsigned PeelCount, LoopInfo *LI,
   SmallVector<std::pair<BasicBlock *, BasicBlock *>, 4> ExitEdges;
   L->getExitEdges(ExitEdges);
 
+  DenseMap<BasicBlock *, BasicBlock *> ExitIDom;
+  if (DT) {
+    assert(L->hasDedicatedExits() && "No dedicated exits?");
+    for (auto Edge : ExitEdges) {
+      if (ExitIDom.count(Edge.second))
+        continue;
+      BasicBlock *BB = DT->getNode(Edge.second)->getIDom()->getBlock();
+      assert(L->contains(BB) && "IDom is not in a loop");
+      ExitIDom[Edge.second] = BB;
+    }
+  }
+
   Function *F = Header->getParent();
 
   // Set up all the necessary basic blocks. It is convenient to split the
@@ -626,22 +648,13 @@ bool llvm::peelLoop(Loop *L, unsigned PeelCount, LoopInfo *LI,
   // newly created branches.
   BranchInst *LatchBR =
       cast<BranchInst>(cast<BasicBlock>(Latch)->getTerminator());
-  uint64_t ExitWeight = 0, CurHeaderWeight = 0;
-  initBranchWeights(Header, LatchBR, PeelCount, ExitWeight, CurHeaderWeight);
+  uint64_t ExitWeight = 0, FallThroughWeight = 0;
+  initBranchWeights(Header, LatchBR, ExitWeight, FallThroughWeight);
 
   // For each peeled-off iteration, make a copy of the loop.
   for (unsigned Iter = 0; Iter < PeelCount; ++Iter) {
     SmallVector<BasicBlock *, 8> NewBlocks;
     ValueToValueMapTy VMap;
-
-    // Subtract the exit weight from the current header weight -- the exit
-    // weight is exactly the weight of the previous iteration's header.
-    // FIXME: due to the way the distribution is constructed, we need a
-    // guard here to make sure we don't end up with non-positive weights.
-    if (ExitWeight < CurHeaderWeight)
-      CurHeaderWeight -= ExitWeight;
-    else
-      CurHeaderWeight = 1;
 
     cloneLoopBlocks(L, Iter, InsertTop, InsertBot, ExitEdges, NewBlocks,
                     LoopBlocks, VMap, LVMap, DT, LI);
@@ -655,17 +668,16 @@ bool llvm::peelLoop(Loop *L, unsigned PeelCount, LoopInfo *LI,
       // latter is the first cloned loop body, as original PreHeader dominates
       // the original loop body.
       if (Iter == 0)
-        for (auto Edge : ExitEdges)
-          DT->changeImmediateDominator(Edge.second,
-                                       cast<BasicBlock>(LVMap[Edge.first]));
+        for (auto Exit : ExitIDom)
+          DT->changeImmediateDominator(Exit.first,
+                                       cast<BasicBlock>(LVMap[Exit.second]));
 #ifdef EXPENSIVE_CHECKS
       assert(DT->verify(DominatorTree::VerificationLevel::Fast));
 #endif
     }
 
     auto *LatchBRCopy = cast<BranchInst>(VMap[LatchBR]);
-    updateBranchWeights(InsertBot, LatchBRCopy, Iter,
-                        PeelCount, ExitWeight);
+    updateBranchWeights(InsertBot, LatchBRCopy, ExitWeight, FallThroughWeight);
     // Remove Loop metadata from the latch branch instruction
     // because it is not the Loop's latch branch anymore.
     LatchBRCopy->setMetadata(LLVMContext::MD_loop, nullptr);
@@ -691,13 +703,16 @@ bool llvm::peelLoop(Loop *L, unsigned PeelCount, LoopInfo *LI,
     PHI->setIncomingValueForBlock(NewPreHeader, NewVal);
   }
 
-  fixupBranchWeights(Header, LatchBR, ExitWeight, CurHeaderWeight);
+  fixupBranchWeights(Header, LatchBR, ExitWeight, FallThroughWeight);
 
   if (Loop *ParentLoop = L->getParentLoop())
     L = ParentLoop;
 
   // We modified the loop, update SE.
   SE->forgetTopmostLoop(L);
+
+  // Finally DomtTree must be correct.
+  assert(DT->verify(DominatorTree::VerificationLevel::Fast));
 
   // FIXME: Incrementally update loop-simplify
   simplifyLoop(L, DT, LI, SE, AC, nullptr, PreserveLCSSA);
