@@ -571,17 +571,18 @@ TEST(TargetParserTest, ARMFPURestriction) {
 TEST(TargetParserTest, ARMExtensionFeatures) {
   std::map<unsigned, std::vector<StringRef>> Extensions;
 
-  Extensions[ARM::AEK_CRC]        = { "+crc",       "-crc" };
-  Extensions[ARM::AEK_DSP]        = { "+dsp",       "-dsp" };
+  for (auto &Ext : ARM::ARCHExtNames) {
+    if (Ext.Feature && Ext.NegFeature)
+      Extensions[Ext.ID] = { StringRef(Ext.Feature),
+                             StringRef(Ext.NegFeature) };
+  }
+
   Extensions[ARM::AEK_HWDIVARM]   = { "+hwdiv-arm", "-hwdiv-arm" };
   Extensions[ARM::AEK_HWDIVTHUMB] = { "+hwdiv",     "-hwdiv" };
-  Extensions[ARM::AEK_RAS]        = { "+ras",       "-ras" };
-  Extensions[ARM::AEK_FP16FML]    = { "+fp16fml",   "-fp16fml" };
-  Extensions[ARM::AEK_DOTPROD]    = { "+dotprod",   "-dotprod" };
 
   std::vector<StringRef> Features;
 
-  EXPECT_FALSE(AArch64::getExtensionFeatures(ARM::AEK_INVALID, Features));
+  EXPECT_FALSE(ARM::getExtensionFeatures(ARM::AEK_INVALID, Features));
 
   for (auto &E : Extensions) {
     // test +extension
@@ -598,7 +599,7 @@ TEST(TargetParserTest, ARMExtensionFeatures) {
     Found = std::find(std::begin(Features), std::end(Features), E.second.at(1));
     EXPECT_TRUE(Found != std::end(Features));
     EXPECT_TRUE(Extensions.size() == Features.size());
-   }
+  }
 }
 
 TEST(TargetParserTest, ARMFPUFeatures) {
@@ -1047,7 +1048,7 @@ TEST(TargetParserTest, AArch64ExtensionFeatures) {
     AArch64::AEK_RDM,      AArch64::AEK_DOTPROD,
     AArch64::AEK_SVE,      AArch64::AEK_SVE2,
     AArch64::AEK_SVE2AES,  AArch64::AEK_SVE2SM4,
-    AArch64::AEK_SVE2SHA3, AArch64::AEK_BITPERM,
+    AArch64::AEK_SVE2SHA3, AArch64::AEK_SVE2BITPERM,
     AArch64::AEK_RCPC,     AArch64::AEK_FP16FML };
 
   std::vector<StringRef> Features;
@@ -1082,7 +1083,7 @@ TEST(TargetParserTest, AArch64ExtensionFeatures) {
   EXPECT_TRUE(std::find(B, E, "+sve2-aes") != E);
   EXPECT_TRUE(std::find(B, E, "+sve2-sm4") != E);
   EXPECT_TRUE(std::find(B, E, "+sve2-sha3") != E);
-  EXPECT_TRUE(std::find(B, E, "+bitperm") != E);
+  EXPECT_TRUE(std::find(B, E, "+sve2-bitperm") != E);
 }
 
 TEST(TargetParserTest, AArch64ArchFeatures) {
@@ -1113,7 +1114,8 @@ TEST(TargetParserTest, AArch64ArchExtFeature) {
                                "-sve2-sm4"},
                               {"sve2-sha3", "nosve2-sha3", "+sve2-sha3",
                                "-sve2-sha3"},
-                              {"bitperm", "nobitperm", "+bitperm", "-bitperm"},
+                              {"sve2-bitperm", "nosve2-bitperm",
+                               "+sve2-bitperm", "-sve2-bitperm"},
                               {"dotprod", "nodotprod", "+dotprod", "-dotprod"},
                               {"rcpc", "norcpc", "+rcpc", "-rcpc" },
                               {"rng", "norng", "+rand", "-rand"},

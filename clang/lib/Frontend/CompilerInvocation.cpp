@@ -2408,7 +2408,7 @@ static void ParseLangArgs(LangOptions &Opts, ArgList &Args, InputKind IK,
         .Cases("cl1.1", "CL1.1", LangStandard::lang_opencl11)
         .Cases("cl1.2", "CL1.2", LangStandard::lang_opencl12)
         .Cases("cl2.0", "CL2.0", LangStandard::lang_opencl20)
-        .Case("c++", LangStandard::lang_openclcpp)
+        .Cases("clc++", "CLC++", LangStandard::lang_openclcpp)
         .Default(LangStandard::lang_unspecified);
 
     if (OpenCLLangStd == LangStandard::lang_unspecified) {
@@ -2745,6 +2745,7 @@ static void ParseLangArgs(LangOptions &Opts, ArgList &Args, InputKind IK,
   Opts.LongDoubleSize = Args.hasArg(OPT_mlong_double_128)
                             ? 128
                             : Args.hasArg(OPT_mlong_double_64) ? 64 : 0;
+  Opts.PPCIEEELongDouble = Args.hasArg(OPT_mabi_EQ_ieeelongdouble);
   Opts.PICLevel = getLastArgIntValue(Args, OPT_pic_level, 0, Diags);
   Opts.ROPI = Args.hasArg(OPT_fropi);
   Opts.RWPI = Args.hasArg(OPT_frwpi);

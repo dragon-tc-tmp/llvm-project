@@ -49,6 +49,9 @@ Non-comprehensive list of changes in this release
   ``EP_FullLinkTimeOptimizationLast`` are available for plugins to specialize
   the legacy pass manager full LTO pipeline.
 
+* **llvm-objcopy/llvm-strip** got support for COFF object files/executables,
+  supporting the most common copying/stripping options.
+
 .. NOTE
    If you would like to document a larger change, then you can add a
    subsection about it right here. You can copy the following boilerplate
@@ -76,6 +79,10 @@ Changes to the LLVM IR
   pointee type. In the next release we intend to make this parameter
   mandatory in preparation for opaque pointer types.
 
+* ``atomicrmw xchg`` now allows floating point types
+
+* ``atomicrmw`` now supports ``fadd`` and ``fsub``
+
 Changes to building LLVM
 ------------------------
 
@@ -99,15 +106,42 @@ Changes to the PowerPC Target
 
  During this release ...
 
+Changes to the SystemZ Target
+-----------------------------
+
+* Support for the arch13 architecture has been added.  When using the
+  ``-march=arch13`` option, the compiler will generate code making use of
+  new instructions introduced with the vector enhancement facility 2
+  and the miscellaneous instruction extension facility 2.
+  The ``-mtune=arch13`` option enables arch13 specific instruction
+  scheduling and tuning without making use of new instructions.
+
+* Builtins for the new vector instructions have been added and can be
+  enabled using the ``-mzvector`` option.  Support for these builtins
+  is indicated by the compiler predefining the ``__VEC__`` macro to
+  the value ``10303``.
+
+* The compiler now supports and automatically generates alignment hints
+  on vector load and store instructions.
+
+* Various code-gen improvements, in particular related to improved
+  instruction selection and register allocation.
+
 Changes to the X86 Target
 -------------------------
 
- During this release ...
+* Fixed a bug in generating DWARF unwind information for 32 bit MinGW
 
 Changes to the AMDGPU Target
 -----------------------------
 
- During this release ...
+* Function call support is now enabled by default
+
+* Improved support for 96-bit loads and stores
+
+* DPP combiner pass is now enabled by default
+
+* Support for gfx10
 
 Changes to the AVR Target
 -----------------------------

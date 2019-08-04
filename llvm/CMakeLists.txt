@@ -25,7 +25,7 @@ if(NOT DEFINED LLVM_VERSION_PATCH)
   set(LLVM_VERSION_PATCH 0)
 endif()
 if(NOT DEFINED LLVM_VERSION_SUFFIX)
-  set(LLVM_VERSION_SUFFIX svn)
+  set(LLVM_VERSION_SUFFIX "")
 endif()
 
 if (NOT PACKAGE_VERSION)
@@ -285,6 +285,7 @@ set(LLVM_ALL_TARGETS
   MSP430
   NVPTX
   PowerPC
+  RISCV
   Sparc
   SystemZ
   WebAssembly
@@ -828,6 +829,11 @@ endif()
 if (UNIX AND ${CMAKE_SYSTEM_NAME} MATCHES "AIX")
           add_definitions("-D_XOPEN_SOURCE=700")
           add_definitions("-D_LARGE_FILE_API")
+endif()
+
+# Build with _FILE_OFFSET_BITS=64 on Solaris to match g++ >= 9.
+if (UNIX AND ${CMAKE_SYSTEM_NAME} MATCHES "SunOS")
+          add_definitions("-D_FILE_OFFSET_BITS=64")
 endif()
 
 # Work around a broken bfd ld behavior. When linking a binary with a

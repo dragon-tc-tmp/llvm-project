@@ -598,6 +598,10 @@ def ext_implicit_lib_function_decl : ExtWarn<
 def note_include_header_or_declare : Note<
   "include the header <%0> or explicitly provide a declaration for '%1'">;
 def note_previous_builtin_declaration : Note<"%0 is a builtin with type %1">;
+def warn_implicit_decl_no_jmp_buf
+    : Warning<"declaration of built-in function '%0' requires the declaration"
+    " of the 'jmp_buf' type, commonly provided in the header <setjmp.h>.">,
+      InGroup<DiagGroup<"incomplete-setjmp-declaration">>;
 def warn_implicit_decl_requires_sysheader : Warning<
   "declaration of built-in function '%1' requires inclusion of the header <%0>">,
   InGroup<BuiltinRequiresHeader>;
@@ -2957,8 +2961,8 @@ def err_attribute_vecreturn_only_pod_record : Error<
 def err_cconv_change : Error<
   "function declared '%0' here was previously declared "
   "%select{'%2'|without calling convention}1">;
-def warn_cconv_ignored : Warning<
-  "%0 calling convention ignored %select{"
+def warn_cconv_unsupported : Warning<
+  "%0 calling convention is not supported %select{"
   // Use CallingConventionIgnoredReason Enum to specify these.
   "for this target"
   "|on variadic function"
