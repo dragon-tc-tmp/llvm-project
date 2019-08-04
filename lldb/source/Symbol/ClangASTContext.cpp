@@ -956,7 +956,7 @@ public:
       llvm::SmallVector<char, 32> diag_str(10);
       info.FormatDiagnostic(diag_str);
       diag_str.push_back('\0');
-      m_log->Printf("Compiler diagnostic: %s\n", diag_str.data());
+      LLDB_LOGF(m_log, "Compiler diagnostic: %s\n", diag_str.data());
     }
   }
 
@@ -2227,7 +2227,7 @@ CompilerType ClangASTContext::CreateFunctionType(
 
 ParmVarDecl *ClangASTContext::CreateParameterDeclaration(
     clang::DeclContext *decl_ctx, const char *name,
-    const CompilerType &param_type, int storage) {
+    const CompilerType &param_type, int storage, bool add_decl) {
   ASTContext *ast = getASTContext();
   assert(ast != nullptr);
   auto *decl =
@@ -2235,7 +2235,9 @@ ParmVarDecl *ClangASTContext::CreateParameterDeclaration(
                           name && name[0] ? &ast->Idents.get(name) : nullptr,
                           ClangUtil::GetQualType(param_type), nullptr,
                           (clang::StorageClass)storage, nullptr);
-  decl_ctx->addDecl(decl);
+  if (add_decl)
+    decl_ctx->addDecl(decl);
+
   return decl;
 }
 

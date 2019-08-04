@@ -52,7 +52,7 @@ The improvements are...
 Improvements to clang-doc
 -------------------------
 
-The improvements are...
+- :doc:`clang-doc <clang-doc>` now generates documentation in HTML format.
 
 Improvements to clang-query
 ---------------------------
@@ -67,7 +67,18 @@ The improvements are...
 Improvements to clang-tidy
 --------------------------
 
-The improvements are...
+- New :doc:`linuxkernel-must-use-errs
+  <clang-tidy/checks/linuxkernel-must-use-errs>` check.
+
+  Checks Linux kernel code to see if it uses the results from the functions in
+  ``linux/err.h``.
+
+- New :doc:`google-upgrade-googletest-case
+  <clang-tidy/checks/google-upgrade-googletest-case>` check.
+
+  Finds uses of deprecated Googletest APIs with names containing ``case`` and
+  replaces them with equivalent APIs with ``suite``.
+
 
 Improvements to include-fixer
 -----------------------------

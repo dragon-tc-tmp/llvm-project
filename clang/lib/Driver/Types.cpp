@@ -18,15 +18,14 @@ using namespace clang::driver::types;
 
 struct TypeInfo {
   const char *Name;
-  const char *Flags;
   const char *TempSuffix;
   ID PreprocessedType;
   const llvm::SmallVector<phases::ID, phases::MaxNumberOfPhases> Phases;
 };
 
 static const TypeInfo TypeInfos[] = {
-#define TYPE(NAME, ID, PP_TYPE, TEMP_SUFFIX, FLAGS, ...) \
-  { NAME, FLAGS, TEMP_SUFFIX, TY_##PP_TYPE, { __VA_ARGS__ }, },
+#define TYPE(NAME, ID, PP_TYPE, TEMP_SUFFIX, ...) \
+  { NAME, TEMP_SUFFIX, TY_##PP_TYPE, { __VA_ARGS__ }, },
 #include "clang/Driver/Types.def"
 #undef TYPE
 };
@@ -42,11 +41,19 @@ const char *types::getTypeName(ID Id) {
 }
 
 types::ID types::getPreprocessedType(ID Id) {
-  return getInfo(Id).PreprocessedType;
+  ID PPT = getInfo(Id).PreprocessedType;
+  assert((llvm::is_contained(getInfo(Id).Phases, phases::Preprocess) !=
+          (PPT == TY_INVALID)) &&
+         "Unexpected Preprocess Type.");
+  return PPT;
+}
+
+static bool isPrepeocessedModuleType(ID Id) {
+  return Id == TY_CXXModule || Id == TY_PP_CXXModule;
 }
 
 types::ID types::getPrecompiledType(ID Id) {
-  if (strchr(getInfo(Id).Flags, 'm'))
+  if (isPrepeocessedModuleType(Id))
     return TY_ModuleFile;
   if (onlyPrecompileType(Id))
     return TY_PCH;
@@ -71,19 +78,31 @@ const char *types::getTypeTempSuffix(ID Id, bool CLMode) {
 }
 
 bool types::onlyAssembleType(ID Id) {
-  return strchr(getInfo(Id).Flags, 'a');
+  return llvm::is_contained(getInfo(Id).Phases, phases::Assemble) &&
+         !llvm::is_contained(getInfo(Id).Phases, phases::Compile) &&
+         !llvm::is_contained(getInfo(Id).Phases, phases::Backend);
 }
 
 bool types::onlyPrecompileType(ID Id) {
-  return strchr(getInfo(Id).Flags, 'p');
+  return llvm::is_contained(getInfo(Id).Phases, phases::Precompile) &&
+         !isPrepeocessedModuleType(Id);
 }
 
 bool types::canTypeBeUserSpecified(ID Id) {
-  return strchr(getInfo(Id).Flags, 'u');
+  static const clang::driver::types::ID kStaticLangageTypes[] = {
+      TY_CUDA_DEVICE,   TY_HIP_DEVICE,    TY_PP_CHeader,
+      TY_PP_ObjCHeader, TY_PP_CXXHeader,  TY_PP_ObjCXXHeader,
+      TY_PP_CXXModule,  TY_LTO_IR,        TY_LTO_BC,
+      TY_Plist,         TY_RewrittenObjC, TY_RewrittenLegacyObjC,
+      TY_Remap,         TY_PCH,           TY_Object,
+      TY_Image,         TY_dSYM,          TY_Dependencies,
+      TY_CUDA_FATBIN,   TY_HIP_FATBIN};
+  return !llvm::is_contained(kStaticLangageTypes, Id);
 }
 
 bool types::appendSuffixForType(ID Id) {
-  return strchr(getInfo(Id).Flags, 'A');
+  return Id == TY_PCH || Id == TY_dSYM || Id == TY_CUDA_FATBIN ||
+         Id == TY_HIP_FATBIN;
 }
 
 bool types::canLipoType(ID Id) {
@@ -269,39 +288,7 @@ types::ID types::lookupTypeForTypeSpecifier(const char *Name) {
 // FIXME: The list is now in Types.def but for now this function will verify
 //        the old behavior and a subsequent change will delete most of the body.
 void types::getCompilationPhases(ID Id, llvm::SmallVectorImpl<phases::ID> &P) {
-  if (Id != TY_Object) {
-    if (getPreprocessedType(Id) != TY_INVALID) {
-      P.push_back(phases::Preprocess);
-    }
-
-    if (getPrecompiledType(Id) != TY_INVALID) {
-      P.push_back(phases::Precompile);
-    }
-
-    if (!onlyPrecompileType(Id)) {
-      if (!onlyAssembleType(Id)) {
-        P.push_back(phases::Compile);
-        P.push_back(phases::Backend);
-      }
-      P.push_back(phases::Assemble);
-    }
-  }
-
-  if (!onlyPrecompileType(Id)) {
-    P.push_back(phases::Link);
-  }
-
-  // Check that the static Phase list matches.
-  // TODO: These will be deleted.
-  const llvm::SmallVectorImpl<phases::ID> &Phases = getInfo(Id).Phases;
-  assert(Phases.size() == P.size() &&
-         std::equal(Phases.begin(), Phases.end(), P.begin()) &&
-         "Invalid phase or size");
-
-  // TODO: This function is still being used to assert that the phase list in
-  //       Types.def is correct. Everything above this comment will be removed
-  //       in a subsequent NFC commit.
-  P = Phases;
+  P = getInfo(Id).Phases;
   assert(0 < P.size() && "Not enough phases in list");
   assert(P.size() <= phases::MaxNumberOfPhases && "Too many phases in list");
 }

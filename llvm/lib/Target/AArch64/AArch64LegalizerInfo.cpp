@@ -52,6 +52,12 @@ AArch64LegalizerInfo::AArch64LegalizerInfo(const AArch64Subtarget &ST) {
   const LLT v2s64 = LLT::vector(2, 64);
   const LLT v2p0 = LLT::vector(2, p0);
 
+  // FIXME: support subtargets which have neon/fp-armv8 disabled.
+  if (!ST.hasNEON() || !ST.hasFPARMv8()) {
+    computeTables();
+    return;
+  }
+
   getActionDefinitionsBuilder(G_IMPLICIT_DEF)
     .legalFor({p0, s1, s8, s16, s32, s64, v4s32, v2s64})
     .clampScalar(0, s1, s64)
@@ -250,14 +256,12 @@ AArch64LegalizerInfo::AArch64LegalizerInfo(const AArch64Subtarget &ST) {
       .legalForTypesWithMemDesc({{s32, p0, 8, 8},
                                  {s32, p0, 16, 8}})
       .clampScalar(0, s8, s64)
-      .widenScalarToNextPow2(0)
-      // TODO: We could support sum-of-pow2's but the lowering code doesn't know
-      //       how to do that yet.
-      .unsupportedIfMemSizeNotPow2()
+      .lowerIfMemSizeNotPow2()
       // Lower any any-extending loads left into G_ANYEXT and G_LOAD
       .lowerIf([=](const LegalityQuery &Query) {
         return Query.Types[0].getSizeInBits() != Query.MMODescrs[0].SizeInBits;
       })
+      .widenScalarToNextPow2(0)
       .clampMaxNumElements(0, s32, 2)
       .clampMaxNumElements(0, s64, 1)
       .customIf(IsPtrVecPred);
@@ -265,6 +269,8 @@ AArch64LegalizerInfo::AArch64LegalizerInfo(const AArch64Subtarget &ST) {
   getActionDefinitionsBuilder(G_STORE)
       .legalForTypesWithMemDesc({{s8, p0, 8, 8},
                                  {s16, p0, 16, 8},
+                                 {s32, p0, 8, 8},
+                                 {s32, p0, 16, 8},
                                  {s32, p0, 32, 8},
                                  {s64, p0, 64, 8},
                                  {p0, p0, 64, 8},
@@ -276,10 +282,7 @@ AArch64LegalizerInfo::AArch64LegalizerInfo(const AArch64Subtarget &ST) {
                                  {v4s32, p0, 128, 8},
                                  {v2s64, p0, 128, 8}})
       .clampScalar(0, s8, s64)
-      .widenScalarToNextPow2(0)
-      // TODO: We could support sum-of-pow2's but the lowering code doesn't know
-      //       how to do that yet.
-      .unsupportedIfMemSizeNotPow2()
+      .lowerIfMemSizeNotPow2()
       .lowerIf([=](const LegalityQuery &Query) {
         return Query.Types[0].isScalar() &&
                Query.Types[0].getSizeInBits() != Query.MMODescrs[0].SizeInBits;
@@ -309,8 +312,8 @@ AArch64LegalizerInfo::AArch64LegalizerInfo(const AArch64Subtarget &ST) {
                  {v8s16, v8s16},
                  {v8s8, v8s8},
                  {v16s8, v16s8}})
-      .clampScalar(0, s32, s32)
       .clampScalar(1, s32, s64)
+      .clampScalar(0, s32, s32)
       .minScalarEltSameAsIf(
           [=](const LegalityQuery &Query) {
             const LLT &Ty = Query.Types[0];
@@ -334,30 +337,36 @@ AArch64LegalizerInfo::AArch64LegalizerInfo(const AArch64Subtarget &ST) {
       .widenScalarToNextPow2(1);
 
   // Extensions
-  getActionDefinitionsBuilder({G_ZEXT, G_SEXT, G_ANYEXT})
-      .legalIf([=](const LegalityQuery &Query) {
-        unsigned DstSize = Query.Types[0].getSizeInBits();
+  auto ExtLegalFunc = [=](const LegalityQuery &Query) {
+    unsigned DstSize = Query.Types[0].getSizeInBits();
 
-        // Make sure that we have something that will fit in a register, and
-        // make sure it's a power of 2.
-        if (DstSize < 8 || DstSize > 128 || !isPowerOf2_32(DstSize))
-          return false;
+    if (DstSize == 128 && !Query.Types[0].isVector())
+      return false; // Extending to a scalar s128 is not legal.
+    
+    // Make sure that we have something that will fit in a register, and
+    // make sure it's a power of 2.
+    if (DstSize < 8 || DstSize > 128 || !isPowerOf2_32(DstSize))
+      return false;
 
-        const LLT &SrcTy = Query.Types[1];
+    const LLT &SrcTy = Query.Types[1];
 
-        // Special case for s1.
-        if (SrcTy == s1)
-          return true;
+    // Special case for s1.
+    if (SrcTy == s1)
+      return true;
 
-        // Make sure we fit in a register otherwise. Don't bother checking that
-        // the source type is below 128 bits. We shouldn't be allowing anything
-        // through which is wider than the destination in the first place.
-        unsigned SrcSize = SrcTy.getSizeInBits();
-        if (SrcSize < 8 || !isPowerOf2_32(SrcSize))
-          return false;
+    // Make sure we fit in a register otherwise. Don't bother checking that
+    // the source type is below 128 bits. We shouldn't be allowing anything
+    // through which is wider than the destination in the first place.
+    unsigned SrcSize = SrcTy.getSizeInBits();
+    if (SrcSize < 8 || !isPowerOf2_32(SrcSize))
+      return false;
 
-        return true;
-      });
+    return true;
+  };
+  getActionDefinitionsBuilder({G_ZEXT, G_ANYEXT}).legalIf(ExtLegalFunc);
+  getActionDefinitionsBuilder(G_SEXT)
+      .legalIf(ExtLegalFunc)
+      .clampScalar(0, s64, s64); // Just for s128, others are handled above.
 
   getActionDefinitionsBuilder(G_TRUNC).alwaysLegal();
 

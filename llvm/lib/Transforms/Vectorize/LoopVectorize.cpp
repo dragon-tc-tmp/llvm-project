@@ -836,6 +836,26 @@ void InnerLoopVectorizer::addMetadata(ArrayRef<Value *> To,
 
 namespace llvm {
 
+// Loop vectorization cost-model hints how the scalar epilogue loop should be
+// lowered.
+enum ScalarEpilogueLowering {
+
+  // The default: allowing scalar epilogues.
+  CM_ScalarEpilogueAllowed,
+
+  // Vectorization with OptForSize: don't allow epilogues.
+  CM_ScalarEpilogueNotAllowedOptSize,
+
+  // A special case of vectorisation with OptForSize: loops with a very small
+  // trip count are considered for vectorization under OptForSize, thereby
+  // making sure the cost of their loop body is dominant, free of runtime
+  // guards and scalar iteration overheads.
+  CM_ScalarEpilogueNotAllowedLowTripLoop,
+
+  // Loop hint predicate indicating an epilogue is undesired.
+  CM_ScalarEpilogueNotNeededPredicatePragma
+};
+
 /// LoopVectorizationCostModel - estimates the expected speedups due to
 /// vectorization.
 /// In many cases vectorization is not profitable. This can happen because of
@@ -845,20 +865,26 @@ namespace llvm {
 /// different operations.
 class LoopVectorizationCostModel {
 public:
-  LoopVectorizationCostModel(Loop *L, PredicatedScalarEvolution &PSE,
-                             LoopInfo *LI, LoopVectorizationLegality *Legal,
+  LoopVectorizationCostModel(ScalarEpilogueLowering SEL, Loop *L,
+                             PredicatedScalarEvolution &PSE, LoopInfo *LI,
+                             LoopVectorizationLegality *Legal,
                              const TargetTransformInfo &TTI,
                              const TargetLibraryInfo *TLI, DemandedBits *DB,
                              AssumptionCache *AC,
                              OptimizationRemarkEmitter *ORE, const Function *F,
                              const LoopVectorizeHints *Hints,
                              InterleavedAccessInfo &IAI)
-      : TheLoop(L), PSE(PSE), LI(LI), Legal(Legal), TTI(TTI), TLI(TLI), DB(DB),
-    AC(AC), ORE(ORE), TheFunction(F), Hints(Hints), InterleaveInfo(IAI) {}
+      : ScalarEpilogueStatus(SEL), TheLoop(L), PSE(PSE), LI(LI), Legal(Legal),
+        TTI(TTI), TLI(TLI), DB(DB), AC(AC), ORE(ORE), TheFunction(F),
+        Hints(Hints), InterleaveInfo(IAI) {}
 
   /// \return An upper bound for the vectorization factor, or None if
   /// vectorization and interleaving should be avoided up front.
-  Optional<unsigned> computeMaxVF(bool OptForSize);
+  Optional<unsigned> computeMaxVF();
+
+  /// \return True if runtime checks are required for vectorization, and false
+  /// otherwise.
+  bool runtimeChecksRequired();
 
   /// \return The most profitable vectorization factor and the cost of that VF.
   /// This method checks every power of two up to MaxVF. If UserVF is not ZERO
@@ -881,8 +907,7 @@ public:
   /// If interleave count has been specified by metadata it will be returned.
   /// Otherwise, the interleave count is computed and returned. VF and LoopCost
   /// are the selected vectorization factor and the cost of the selected VF.
-  unsigned selectInterleaveCount(bool OptForSize, unsigned VF,
-                                 unsigned LoopCost);
+  unsigned selectInterleaveCount(unsigned VF, unsigned LoopCost);
 
   /// Memory access instruction may be vectorized in more than one way.
   /// Form of instruction after vectorization depends on cost.
@@ -1157,11 +1182,14 @@ public:
   /// to handle accesses with gaps, and there is nothing preventing us from
   /// creating a scalar epilogue.
   bool requiresScalarEpilogue() const {
-    return IsScalarEpilogueAllowed && InterleaveInfo.requiresScalarEpilogue();
+    return isScalarEpilogueAllowed() && InterleaveInfo.requiresScalarEpilogue();
   }
 
-  /// Returns true if a scalar epilogue is not allowed due to optsize.
-  bool isScalarEpilogueAllowed() const { return IsScalarEpilogueAllowed; }
+  /// Returns true if a scalar epilogue is not allowed due to optsize or a
+  /// loop hint annotation.
+  bool isScalarEpilogueAllowed() const {
+    return ScalarEpilogueStatus == CM_ScalarEpilogueAllowed;
+  }
 
   /// Returns true if all loop blocks should be masked to fold tail loop.
   bool foldTailByMasking() const { return FoldTailByMasking; }
@@ -1187,7 +1215,7 @@ private:
 
   /// \return An upper bound for the vectorization factor, larger than zero.
   /// One is returned if vectorization should best be avoided due to cost.
-  unsigned computeFeasibleMaxVF(bool OptForSize, unsigned ConstTripCount);
+  unsigned computeFeasibleMaxVF(unsigned ConstTripCount);
 
   /// The vectorization cost is a combination of the cost itself and a boolean
   /// indicating whether any of the contributing operations will actually
@@ -1270,13 +1298,13 @@ private:
   SmallPtrSet<BasicBlock *, 4> PredicatedBBsAfterVectorization;
 
   /// Records whether it is allowed to have the original scalar loop execute at
-  /// least once. This may be needed as a fallback loop in case runtime 
+  /// least once. This may be needed as a fallback loop in case runtime
   /// aliasing/dependence checks fail, or to handle the tail/remainder
   /// iterations when the trip count is unknown or doesn't divide by the VF,
   /// or as a peel-loop to handle gaps in interleave-groups.
   /// Under optsize and when the trip count is very small we don't allow any
   /// iterations to execute in the scalar loop.
-  bool IsScalarEpilogueAllowed = true;
+  ScalarEpilogueLowering ScalarEpilogueStatus = CM_ScalarEpilogueAllowed;
 
   /// All blocks of loop are to be masked to fold tail of scalar iterations.
   bool FoldTailByMasking = false;
@@ -4452,10 +4480,10 @@ bool LoopVectorizationCostModel::interleavedAccessCanBeWidened(Instruction *I,
   // Check if masking is required.
   // A Group may need masking for one of two reasons: it resides in a block that
   // needs predication, or it was decided to use masking to deal with gaps.
-  bool PredicatedAccessRequiresMasking = 
+  bool PredicatedAccessRequiresMasking =
       Legal->blockNeedsPredication(I->getParent()) && Legal->isMaskRequired(I);
-  bool AccessWithGapsRequiresMasking = 
-      Group->requiresScalarEpilogue() && !IsScalarEpilogueAllowed;
+  bool AccessWithGapsRequiresMasking =
+      Group->requiresScalarEpilogue() && !isScalarEpilogueAllowed();
   if (!PredicatedAccessRequiresMasking && !AccessWithGapsRequiresMasking)
     return true;
 
@@ -4675,7 +4703,47 @@ void LoopVectorizationCostModel::collectLoopUniforms(unsigned VF) {
   Uniforms[VF].insert(Worklist.begin(), Worklist.end());
 }
 
-Optional<unsigned> LoopVectorizationCostModel::computeMaxVF(bool OptForSize) {
+bool LoopVectorizationCostModel::runtimeChecksRequired() {
+  LLVM_DEBUG(dbgs() << "LV: Performing code size checks.\n");
+
+  if (Legal->getRuntimePointerChecking()->Need) {
+    ORE->emit(createMissedAnalysis("CantVersionLoopWithOptForSize")
+              << "runtime pointer checks needed. Enable vectorization of this "
+                 "loop with '#pragma clang loop vectorize(enable)' when "
+                 "compiling with -Os/-Oz");
+    LLVM_DEBUG(
+        dbgs()
+        << "LV: Aborting. Runtime ptr check is required with -Os/-Oz.\n");
+    return true;
+  }
+
+  if (!PSE.getUnionPredicate().getPredicates().empty()) {
+    ORE->emit(createMissedAnalysis("CantVersionLoopWithOptForSize")
+              << "runtime SCEV checks needed. Enable vectorization of this "
+                 "loop with '#pragma clang loop vectorize(enable)' when "
+                 "compiling with -Os/-Oz");
+    LLVM_DEBUG(
+        dbgs()
+        << "LV: Aborting. Runtime SCEV check is required with -Os/-Oz.\n");
+    return true;
+  }
+
+  // FIXME: Avoid specializing for stride==1 instead of bailing out.
+  if (!Legal->getLAI()->getSymbolicStrides().empty()) {
+    ORE->emit(createMissedAnalysis("CantVersionLoopWithOptForSize")
+              << "runtime stride == 1 checks needed. Enable vectorization of "
+                 "this loop with '#pragma clang loop vectorize(enable)' when "
+                 "compiling with -Os/-Oz");
+    LLVM_DEBUG(
+        dbgs()
+        << "LV: Aborting. Runtime stride check is required with -Os/-Oz.\n");
+    return true;
+  }
+
+  return false;
+}
+
+Optional<unsigned> LoopVectorizationCostModel::computeMaxVF() {
   if (Legal->getRuntimePointerChecking()->Need && TTI.hasBranchDivergence()) {
     // TODO: It may by useful to do since it's still likely to be dynamically
     // uniform if the target can skip.
@@ -4690,46 +4758,7 @@ Optional<unsigned> LoopVectorizationCostModel::computeMaxVF(bool OptForSize) {
   }
 
   unsigned TC = PSE.getSE()->getSmallConstantTripCount(TheLoop);
-  if (!OptForSize) // Remaining checks deal with scalar loop when OptForSize.
-    return computeFeasibleMaxVF(OptForSize, TC);
-
-  if (Legal->getRuntimePointerChecking()->Need) {
-    ORE->emit(createMissedAnalysis("CantVersionLoopWithOptForSize")
-              << "runtime pointer checks needed. Enable vectorization of this "
-                 "loop with '#pragma clang loop vectorize(enable)' when "
-                 "compiling with -Os/-Oz");
-    LLVM_DEBUG(
-        dbgs()
-        << "LV: Aborting. Runtime ptr check is required with -Os/-Oz.\n");
-    return None;
-  }
-
-  if (!PSE.getUnionPredicate().getPredicates().empty()) {
-    ORE->emit(createMissedAnalysis("CantVersionLoopWithOptForSize")
-              << "runtime SCEV checks needed. Enable vectorization of this "
-                 "loop with '#pragma clang loop vectorize(enable)' when "
-                 "compiling with -Os/-Oz");
-    LLVM_DEBUG(
-        dbgs()
-        << "LV: Aborting. Runtime SCEV check is required with -Os/-Oz.\n");
-    return None;
-  }
-
-  // FIXME: Avoid specializing for stride==1 instead of bailing out.
-  if (!Legal->getLAI()->getSymbolicStrides().empty()) {
-    ORE->emit(createMissedAnalysis("CantVersionLoopWithOptForSize")
-              << "runtime stride == 1 checks needed. Enable vectorization of "
-                 "this loop with '#pragma clang loop vectorize(enable)' when "
-                 "compiling with -Os/-Oz");
-    LLVM_DEBUG(
-        dbgs()
-        << "LV: Aborting. Runtime stride check is required with -Os/-Oz.\n");
-    return None;
-  }
-
-  // If we optimize the program for size, avoid creating the tail loop.
   LLVM_DEBUG(dbgs() << "LV: Found trip count: " << TC << '\n');
-
   if (TC == 1) {
     ORE->emit(createMissedAnalysis("SingleIterationLoop")
               << "loop trip count is one, irrelevant for vectorization");
@@ -4737,20 +4766,42 @@ Optional<unsigned> LoopVectorizationCostModel::computeMaxVF(bool OptForSize) {
     return None;
   }
 
-  // Record that scalar epilogue is not allowed.
-  LLVM_DEBUG(dbgs() << "LV: Not allowing scalar epilogue due to -Os/-Oz.\n");
+  switch (ScalarEpilogueStatus) {
+  case CM_ScalarEpilogueAllowed:
+    return computeFeasibleMaxVF(TC);
+  case CM_ScalarEpilogueNotNeededPredicatePragma:
+    LLVM_DEBUG(
+        dbgs() << "LV: vector predicate hint found.\n"
+               << "LV: Not allowing scalar epilogue, creating predicated "
+               << "vector loop.\n");
+    break;
+  case CM_ScalarEpilogueNotAllowedLowTripLoop:
+    // fallthrough as a special case of OptForSize
+  case CM_ScalarEpilogueNotAllowedOptSize:
+    if (ScalarEpilogueStatus == CM_ScalarEpilogueNotAllowedOptSize)
+      LLVM_DEBUG(
+          dbgs() << "LV: Not allowing scalar epilogue due to -Os/-Oz.\n");
+    else
+      LLVM_DEBUG(dbgs() << "LV: Not allowing scalar epilogue due to low trip "
+                        << "count.\n");
 
-  IsScalarEpilogueAllowed = !OptForSize;
+    // Bail if runtime checks are required, which are not good when optimising
+    // for size.
+    if (runtimeChecksRequired())
+      return None;
+    break;
+  }
 
-  // We don't create an epilogue when optimizing for size.
+  // Now try the tail folding
+
   // Invalidate interleave groups that require an epilogue if we can't mask
   // the interleave-group.
-  if (!useMaskedInterleavedAccesses(TTI)) 
+  if (!useMaskedInterleavedAccesses(TTI))
     InterleaveInfo.invalidateGroupsRequiringScalarEpilogue();
 
-  unsigned MaxVF = computeFeasibleMaxVF(OptForSize, TC);
-
+  unsigned MaxVF = computeFeasibleMaxVF(TC);
   if (TC > 0 && TC % MaxVF == 0) {
+    // Accept MaxVF if we do not have a tail.
     LLVM_DEBUG(dbgs() << "LV: No tail will remain for any chosen VF.\n");
     return MaxVF;
   }
@@ -4779,8 +4830,7 @@ Optional<unsigned> LoopVectorizationCostModel::computeMaxVF(bool OptForSize) {
 }
 
 unsigned
-LoopVectorizationCostModel::computeFeasibleMaxVF(bool OptForSize,
-                                                 unsigned ConstTripCount) {
+LoopVectorizationCostModel::computeFeasibleMaxVF(unsigned ConstTripCount) {
   MinBWs = computeMinimumValueSizes(TheLoop->getBlocks(), *DB, &TTI);
   unsigned SmallestType, WidestType;
   std::tie(SmallestType, WidestType) = getSmallestAndWidestTypes();
@@ -4818,8 +4868,8 @@ LoopVectorizationCostModel::computeFeasibleMaxVF(bool OptForSize,
   }
 
   unsigned MaxVF = MaxVectorSize;
-  if (TTI.shouldMaximizeVectorBandwidth(OptForSize) ||
-      (MaximizeBandwidth && !OptForSize)) {
+  if (TTI.shouldMaximizeVectorBandwidth(!isScalarEpilogueAllowed()) ||
+      (MaximizeBandwidth && isScalarEpilogueAllowed())) {
     // Collect all viable vectorization factors larger than the default MaxVF
     // (i.e. MaxVectorSize).
     SmallVector<unsigned, 8> VFs;
@@ -4958,8 +5008,7 @@ LoopVectorizationCostModel::getSmallestAndWidestTypes() {
   return {MinWidth, MaxWidth};
 }
 
-unsigned LoopVectorizationCostModel::selectInterleaveCount(bool OptForSize,
-                                                           unsigned VF,
+unsigned LoopVectorizationCostModel::selectInterleaveCount(unsigned VF,
                                                            unsigned LoopCost) {
   // -- The interleave heuristics --
   // We interleave the loop in order to expose ILP and reduce the loop overhead.
@@ -4975,8 +5024,7 @@ unsigned LoopVectorizationCostModel::selectInterleaveCount(bool OptForSize,
   // 3. We don't interleave if we think that we will spill registers to memory
   // due to the increased register pressure.
 
-  // When we optimize for size, we don't interleave.
-  if (OptForSize)
+  if (!isScalarEpilogueAllowed())
     return 1;
 
   // We used the distance for the interleave count.
@@ -5626,8 +5674,8 @@ unsigned LoopVectorizationCostModel::getInterleaveGroupCost(Instruction *I,
   }
 
   // Calculate the cost of the whole interleaved group.
-  bool UseMaskForGaps = 
-      Group->requiresScalarEpilogue() && !IsScalarEpilogueAllowed;
+  bool UseMaskForGaps =
+      Group->requiresScalarEpilogue() && !isScalarEpilogueAllowed();
   unsigned Cost = TTI.getInterleavedMemoryOpCost(
       I->getOpcode(), WideVecTy, Group->getFactor(), Indices,
       Group->getAlignment(), AS, Legal->isMaskRequired(I), UseMaskForGaps);
@@ -6167,8 +6215,7 @@ static unsigned determineVPlanVF(const unsigned WidestVectorRegBits,
 }
 
 VectorizationFactor
-LoopVectorizationPlanner::planInVPlanNativePath(bool OptForSize,
-                                                unsigned UserVF) {
+LoopVectorizationPlanner::planInVPlanNativePath(unsigned UserVF) {
   unsigned VF = UserVF;
   // Outer loop handling: They may require CFG and instruction level
   // transformations before even evaluating whether vectorization is profitable.
@@ -6207,10 +6254,9 @@ LoopVectorizationPlanner::planInVPlanNativePath(bool OptForSize,
   return VectorizationFactor::Disabled();
 }
 
-Optional<VectorizationFactor> LoopVectorizationPlanner::plan(bool OptForSize,
-                                                             unsigned UserVF) {
+Optional<VectorizationFactor> LoopVectorizationPlanner::plan(unsigned UserVF) {
   assert(OrigLoop->empty() && "Inner loop expected.");
-  Optional<unsigned> MaybeMaxVF = CM.computeMaxVF(OptForSize);
+  Optional<unsigned> MaybeMaxVF = CM.computeMaxVF();
   if (!MaybeMaxVF) // Cases that should not to be vectorized nor interleaved.
     return None;
 
@@ -7199,6 +7245,20 @@ void VPWidenMemoryInstructionRecipe::execute(VPTransformState &State) {
   State.ILV->vectorizeMemoryInstruction(&Instr, &MaskValues);
 }
 
+static ScalarEpilogueLowering
+getScalarEpilogueLowering(Function *F, Loop *L, LoopVectorizeHints &Hints,
+                          ProfileSummaryInfo *PSI, BlockFrequencyInfo *BFI) {
+  ScalarEpilogueLowering SEL = CM_ScalarEpilogueAllowed;
+  if (Hints.getForce() != LoopVectorizeHints::FK_Enabled &&
+      (F->hasOptSize() ||
+       llvm::shouldOptimizeForSize(L->getHeader(), PSI, BFI)))
+    SEL = CM_ScalarEpilogueNotAllowedOptSize;
+  else if (Hints.getPredicate())
+    SEL = CM_ScalarEpilogueNotNeededPredicatePragma;
+
+  return SEL;
+}
+
 // Process the loop in the VPlan-native vectorization path. This path builds
 // VPlan upfront in the vectorization pipeline, which allows to apply
 // VPlan-to-VPlan transformations from the very beginning without modifying the
@@ -7213,7 +7273,9 @@ static bool processLoopInVPlanNativePath(
   assert(EnableVPlanNativePath && "VPlan-native path is disabled.");
   Function *F = L->getHeader()->getParent();
   InterleavedAccessInfo IAI(PSE, L, DT, LI, LVL->getLAI());
-  LoopVectorizationCostModel CM(L, PSE, LI, LVL, *TTI, TLI, DB, AC, ORE, F,
+  ScalarEpilogueLowering SEL = getScalarEpilogueLowering(F, L, Hints, PSI, BFI);
+
+  LoopVectorizationCostModel CM(SEL, L, PSE, LI, LVL, *TTI, TLI, DB, AC, ORE, F,
                                 &Hints, IAI);
   // Use the planner for outer loop vectorization.
   // TODO: CM is not used at this point inside the planner. Turn CM into an
@@ -7223,15 +7285,8 @@ static bool processLoopInVPlanNativePath(
   // Get user vectorization factor.
   const unsigned UserVF = Hints.getWidth();
 
-  // Check the function attributes and profiles to find out if this function
-  // should be optimized for size.
-  bool OptForSize =
-      Hints.getForce() != LoopVectorizeHints::FK_Enabled &&
-      (F->hasOptSize() ||
-       llvm::shouldOptimizeForSize(L->getHeader(), PSI, BFI));
-
   // Plan how to best vectorize, return the best VF and its cost.
-  const VectorizationFactor VF = LVP.planInVPlanNativePath(OptForSize, UserVF);
+  const VectorizationFactor VF = LVP.planInVPlanNativePath(UserVF);
 
   // If we are stress testing VPlan builds, do not attempt to generate vector
   // code. Masked vector code generation support will follow soon.
@@ -7310,10 +7365,7 @@ bool LoopVectorizePass::processLoop(Loop *L) {
 
   // Check the function attributes and profiles to find out if this function
   // should be optimized for size.
-  bool OptForSize =
-      Hints.getForce() != LoopVectorizeHints::FK_Enabled &&
-      (F->hasOptSize() ||
-       llvm::shouldOptimizeForSize(L->getHeader(), PSI, BFI));
+  ScalarEpilogueLowering SEL = getScalarEpilogueLowering(F, L, Hints, PSI, BFI);
 
   // Entrance to the VPlan-native vectorization path. Outer loops are processed
   // here. They may require CFG and instruction level transformations before
@@ -7362,10 +7414,7 @@ bool LoopVectorizePass::processLoop(Loop *L) {
       LLVM_DEBUG(dbgs() << " But vectorizing was explicitly forced.\n");
     else {
       LLVM_DEBUG(dbgs() << "\n");
-      // Loops with a very small trip count are considered for vectorization
-      // under OptForSize, thereby making sure the cost of their loop body is
-      // dominant, free of runtime guards and scalar iteration overheads.
-      OptForSize = true;
+      SEL = CM_ScalarEpilogueNotAllowedLowTripLoop;
     }
   }
 
@@ -7411,8 +7460,8 @@ bool LoopVectorizePass::processLoop(Loop *L) {
   }
 
   // Use the cost model.
-  LoopVectorizationCostModel CM(L, PSE, LI, &LVL, *TTI, TLI, DB, AC, ORE, F,
-                                &Hints, IAI);
+  LoopVectorizationCostModel CM(SEL, L, PSE, LI, &LVL, *TTI, TLI, DB, AC, ORE,
+                                F, &Hints, IAI);
   CM.collectValuesToIgnore();
 
   // Use the planner for vectorization.
@@ -7422,7 +7471,7 @@ bool LoopVectorizePass::processLoop(Loop *L) {
   unsigned UserVF = Hints.getWidth();
 
   // Plan how to best vectorize, return the best VF and its cost.
-  Optional<VectorizationFactor> MaybeVF = LVP.plan(OptForSize, UserVF);
+  Optional<VectorizationFactor> MaybeVF = LVP.plan(UserVF);
 
   VectorizationFactor VF = VectorizationFactor::Disabled();
   unsigned IC = 1;
@@ -7431,7 +7480,7 @@ bool LoopVectorizePass::processLoop(Loop *L) {
   if (MaybeVF) {
     VF = *MaybeVF;
     // Select the interleave count.
-    IC = CM.selectInterleaveCount(OptForSize, VF.Width, VF.Cost);
+    IC = CM.selectInterleaveCount(VF.Width, VF.Cost);
   }
 
   // Identify the diagnostic messages that should be produced.

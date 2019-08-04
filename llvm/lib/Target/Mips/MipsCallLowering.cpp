@@ -106,6 +106,7 @@ private:
                    Register ArgsReg, const EVT &VT) override;
 
   virtual void markPhysRegUsed(unsigned PhysReg) {
+    MIRBuilder.getMRI()->addLiveIn(PhysReg);
     MIRBuilder.getMBB().addLiveIn(PhysReg);
   }
 
@@ -502,7 +503,8 @@ bool MipsCallLowering::lowerCall(MachineIRBuilder &MIRBuilder,
                                  CallingConv::ID CallConv,
                                  const MachineOperand &Callee,
                                  const ArgInfo &OrigRet,
-                                 ArrayRef<ArgInfo> OrigArgs) const {
+                                 ArrayRef<ArgInfo> OrigArgs,
+                                 const MDNode *KnownCallees) const {
 
   if (CallConv != CallingConv::C)
     return false;
@@ -514,7 +516,7 @@ bool MipsCallLowering::lowerCall(MachineIRBuilder &MIRBuilder,
       return false;
   }
 
-  if (OrigRet.Regs[0] && !isSupportedType(OrigRet.Ty))
+  if (!OrigRet.Ty->isVoidTy() && !isSupportedType(OrigRet.Ty))
     return false;
 
   MachineFunction &MF = MIRBuilder.getMF();
@@ -599,7 +601,7 @@ bool MipsCallLowering::lowerCall(MachineIRBuilder &MIRBuilder,
                          *STI.getRegBankInfo());
   }
 
-  if (OrigRet.Regs[0]) {
+  if (!OrigRet.Ty->isVoidTy()) {
     ArgInfos.clear();
     SmallVector<unsigned, 8> OrigRetIndices;
 

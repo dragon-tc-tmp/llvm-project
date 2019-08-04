@@ -18,6 +18,7 @@
 #include "llvm/Remarks/Remark.h"
 #include "llvm/Remarks/RemarkParser.h"
 #include "llvm/Support/Error.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/YAMLParser.h"
 #include "llvm/Support/YAMLTraits.h"
@@ -46,7 +47,7 @@ private:
 };
 
 /// Regular YAML to Remark parser.
-struct YAMLRemarkParser : public Parser {
+struct YAMLRemarkParser : public RemarkParser {
   /// The string table used for parsing strings.
   Optional<ParsedStringTable> StrTab;
   /// Last error message that can come from the YAML parser diagnostics.
@@ -58,12 +59,15 @@ struct YAMLRemarkParser : public Parser {
   yaml::Stream Stream;
   /// Iterator in the YAML stream.
   yaml::document_iterator YAMLIt;
+  /// If we parse remark metadata in separate mode, we need to open a new file
+  /// and parse that.
+  std::unique_ptr<MemoryBuffer> SeparateBuf;
 
   YAMLRemarkParser(StringRef Buf);
 
   Expected<std::unique_ptr<Remark>> next() override;
 
-  static bool classof(const Parser *P) {
+  static bool classof(const RemarkParser *P) {
     return P->ParserFormat == Format::YAML;
   }
 
@@ -96,7 +100,7 @@ struct YAMLStrTabRemarkParser : public YAMLRemarkParser {
   YAMLStrTabRemarkParser(StringRef Buf, ParsedStringTable StrTab)
       : YAMLRemarkParser(Buf, std::move(StrTab)) {}
 
-  static bool classof(const Parser *P) {
+  static bool classof(const RemarkParser *P) {
     return P->ParserFormat == Format::YAMLStrTab;
   }
 
@@ -104,6 +108,11 @@ protected:
   /// Parse one value to a string.
   Expected<StringRef> parseStr(yaml::KeyValueNode &Node) override;
 };
+
+Expected<std::unique_ptr<YAMLRemarkParser>>
+createYAMLParserFromMeta(StringRef Buf,
+                         Optional<ParsedStringTable> StrTab = None);
+
 } // end namespace remarks
 } // end namespace llvm
 

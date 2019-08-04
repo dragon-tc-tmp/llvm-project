@@ -35,10 +35,10 @@ public:
   static const char *GetPluginDescriptionStatic();
 
   static lldb_private::SymbolFile *
-  CreateInstance(lldb_private::ObjectFile *obj_file);
+  CreateInstance(lldb::ObjectFileSP objfile_sp);
 
   // Constructors and Destructors
-  SymbolFilePDB(lldb_private::ObjectFile *ofile);
+  SymbolFilePDB(lldb::ObjectFileSP objfile_sp);
 
   ~SymbolFilePDB() override;
 
@@ -138,13 +138,11 @@ public:
   void FindTypesByRegex(const lldb_private::RegularExpression &regex,
                         uint32_t max_matches, lldb_private::TypeMap &types);
 
-  lldb_private::TypeList *GetTypeList() override;
-
   size_t GetTypes(lldb_private::SymbolContextScope *sc_scope,
                   lldb::TypeClass type_mask,
                   lldb_private::TypeList &type_list) override;
 
-  lldb_private::TypeSystem *
+  llvm::Expected<lldb_private::TypeSystem &>
   GetTypeSystemForLanguage(lldb::LanguageType language) override;
 
   lldb_private::CompilerDeclContext FindNamespace(
