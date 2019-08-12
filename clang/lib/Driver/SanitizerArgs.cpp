@@ -46,7 +46,8 @@ static const SanitizerMask SupportsCoverage =
     SanitizerKind::Undefined | SanitizerKind::Integer |
     SanitizerKind::ImplicitConversion | SanitizerKind::Nullability |
     SanitizerKind::DataFlow | SanitizerKind::Fuzzer |
-    SanitizerKind::FuzzerNoLink | SanitizerKind::FloatDivideByZero;
+    SanitizerKind::FuzzerNoLink | SanitizerKind::FloatDivideByZero |
+    SanitizerKind::SafeStack | SanitizerKind::ShadowCallStack;
 static const SanitizerMask RecoverableByDefault =
     SanitizerKind::Undefined | SanitizerKind::Integer |
     SanitizerKind::ImplicitConversion | SanitizerKind::Nullability |
@@ -635,6 +636,10 @@ SanitizerArgs::SanitizerArgs(const ToolChain &TC,
       D.Diag(diag::err_drv_argument_not_allowed_with)
           << "-fsanitize-cfi-cross-dso"
           << "-fsanitize-cfi-icall-generalize-pointers";
+
+    CfiCanonicalJumpTables =
+        Args.hasFlag(options::OPT_fsanitize_cfi_canonical_jump_tables,
+                     options::OPT_fno_sanitize_cfi_canonical_jump_tables, true);
   }
 
   Stats = Args.hasFlag(options::OPT_fsanitize_stats,
@@ -824,9 +829,15 @@ SanitizerArgs::SanitizerArgs(const ToolChain &TC,
     SafeStackRuntime = !TC.getTriple().isOSFuchsia();
   }
 
+  LinkRuntimes =
+      Args.hasFlag(options::OPT_fsanitize_link_runtime,
+                   options::OPT_fno_sanitize_link_runtime, LinkRuntimes);
+
   // Parse -link-cxx-sanitizer flag.
-  LinkCXXRuntimes =
-      Args.hasArg(options::OPT_fsanitize_link_cxx_runtime) || D.CCCIsCXX();
+  LinkCXXRuntimes = Args.hasArg(options::OPT_fsanitize_link_cxx_runtime,
+                                options::OPT_fno_sanitize_link_cxx_runtime,
+                                LinkCXXRuntimes) ||
+                    D.CCCIsCXX();
 
   // Finally, initialize the set of available and recoverable sanitizers.
   Sanitizers.Mask |= Kinds;
@@ -969,6 +980,9 @@ void SanitizerArgs::addArgs(const ToolChain &TC, const llvm::opt::ArgList &Args,
   if (CfiICallGeneralizePointers)
     CmdArgs.push_back("-fsanitize-cfi-icall-generalize-pointers");
 
+  if (CfiCanonicalJumpTables)
+    CmdArgs.push_back("-fsanitize-cfi-canonical-jump-tables");
+
   if (Stats)
     CmdArgs.push_back("-fsanitize-stats");
 
@@ -1004,6 +1018,11 @@ void SanitizerArgs::addArgs(const ToolChain &TC, const llvm::opt::ArgList &Args,
   if (!HwasanAbi.empty()) {
     CmdArgs.push_back("-default-function-attr");
     CmdArgs.push_back(Args.MakeArgString("hwasan-abi=" + HwasanAbi));
+  }
+
+  if (Sanitizers.has(SanitizerKind::HWAddress)) {
+    CmdArgs.push_back("-target-feature");
+    CmdArgs.push_back("+tagged-globals");
   }
 
   // MSan: Workaround for PR16386.
