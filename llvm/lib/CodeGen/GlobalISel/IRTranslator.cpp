@@ -1373,12 +1373,13 @@ bool IRTranslator::translateKnownIntrinsic(const CallInst &CI, Intrinsic::ID ID,
     } else if (const auto *CI = dyn_cast<Constant>(V)) {
       MIRBuilder.buildConstDbgValue(*CI, DI.getVariable(), DI.getExpression());
     } else {
-      Register Reg = getOrCreateVReg(*V);
-      // FIXME: This does not handle register-indirect values at offset 0. The
-      // direct/indirect thing shouldn't really be handled by something as
-      // implicit as reg+noreg vs reg+imm in the first palce, but it seems
-      // pretty baked in right now.
-      MIRBuilder.buildDirectDbgValue(Reg, DI.getVariable(), DI.getExpression());
+      for (Register Reg : getOrCreateVRegs(*V)) {
+        // FIXME: This does not handle register-indirect values at offset 0. The
+        // direct/indirect thing shouldn't really be handled by something as
+        // implicit as reg+noreg vs reg+imm in the first place, but it seems
+        // pretty baked in right now.
+        MIRBuilder.buildDirectDbgValue(Reg, DI.getVariable(), DI.getExpression());
+      }
     }
     return true;
   }
@@ -1780,36 +1781,25 @@ bool IRTranslator::translateAlloca(const User &U,
 
   Register AllocSize = MRI->createGenericVirtualRegister(IntPtrTy);
   Register TySize =
-      getOrCreateVReg(*ConstantInt::get(IntPtrIRTy, -DL->getTypeAllocSize(Ty)));
+      getOrCreateVReg(*ConstantInt::get(IntPtrIRTy, DL->getTypeAllocSize(Ty)));
   MIRBuilder.buildMul(AllocSize, NumElts, TySize);
 
-  LLT PtrTy = getLLTForType(*AI.getType(), *DL);
-  auto &TLI = *MF->getSubtarget().getTargetLowering();
-  Register SPReg = TLI.getStackPointerRegisterToSaveRestore();
-
-  Register SPTmp = MRI->createGenericVirtualRegister(PtrTy);
-  MIRBuilder.buildCopy(SPTmp, SPReg);
-
-  Register AllocTmp = MRI->createGenericVirtualRegister(PtrTy);
-  MIRBuilder.buildGEP(AllocTmp, SPTmp, AllocSize);
-
-  // Handle alignment. We have to realign if the allocation granule was smaller
-  // than stack alignment, or the specific alloca requires more than stack
-  // alignment.
   unsigned StackAlign =
       MF->getSubtarget().getFrameLowering()->getStackAlignment();
-  Align = std::max(Align, StackAlign);
-  if (Align > StackAlign || DL->getTypeAllocSize(Ty) % StackAlign != 0) {
-    // Round the size of the allocation up to the stack alignment size
-    // by add SA-1 to the size. This doesn't overflow because we're computing
-    // an address inside an alloca.
-    Register AlignedAlloc = MRI->createGenericVirtualRegister(PtrTy);
-    MIRBuilder.buildPtrMask(AlignedAlloc, AllocTmp, Log2_32(Align));
-    AllocTmp = AlignedAlloc;
-  }
+  if (Align <= StackAlign)
+    Align = 0;
 
-  MIRBuilder.buildCopy(SPReg, AllocTmp);
-  MIRBuilder.buildCopy(getOrCreateVReg(AI), AllocTmp);
+  // Round the size of the allocation up to the stack alignment size
+  // by add SA-1 to the size. This doesn't overflow because we're computing
+  // an address inside an alloca.
+  auto SAMinusOne = MIRBuilder.buildConstant(IntPtrTy, StackAlign - 1);
+  auto AllocAdd = MIRBuilder.buildAdd(IntPtrTy, AllocSize, SAMinusOne,
+                                      MachineInstr::NoUWrap);
+  auto AlignCst =
+      MIRBuilder.buildConstant(IntPtrTy, ~(uint64_t)(StackAlign - 1));
+  auto AlignedAlloc = MIRBuilder.buildAnd(IntPtrTy, AllocAdd, AlignCst);
+
+  MIRBuilder.buildDynStackAlloc(getOrCreateVReg(AI), AlignedAlloc, Align);
 
   MF->getFrameInfo().CreateVariableSizedObject(Align ? Align : 1, &AI);
   assert(MF->getFrameInfo().hasVarSizedObjects());

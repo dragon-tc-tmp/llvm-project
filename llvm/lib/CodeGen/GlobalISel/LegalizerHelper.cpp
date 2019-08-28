@@ -17,6 +17,7 @@
 #include "llvm/CodeGen/GlobalISel/GISelChangeObserver.h"
 #include "llvm/CodeGen/GlobalISel/LegalizerInfo.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
+#include "llvm/CodeGen/TargetFrameLowering.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
 #include "llvm/CodeGen/TargetLowering.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
@@ -615,6 +616,39 @@ LegalizerHelper::LegalizeResult LegalizerHelper::narrowScalar(MachineInstr &MI,
     MI.eraseFromParent();
     return Legalized;
   }
+  case TargetOpcode::G_ZEXT: {
+    if (TypeIdx != 0)
+      return UnableToLegalize;
+
+    if (SizeOp0 % NarrowTy.getSizeInBits() != 0)
+      return UnableToLegalize;
+
+    // Generate a merge where the bottom bits are taken from the source, and
+    // zero everything else.
+    Register ZeroReg = MIRBuilder.buildConstant(NarrowTy, 0).getReg(0);
+    unsigned NumParts = SizeOp0 / NarrowTy.getSizeInBits();
+    SmallVector<Register, 4> Srcs = {MI.getOperand(1).getReg()};
+    for (unsigned Part = 1; Part < NumParts; ++Part)
+      Srcs.push_back(ZeroReg);
+    MIRBuilder.buildMerge(MI.getOperand(0).getReg(), Srcs);
+    MI.eraseFromParent();
+    return Legalized;
+  }
+  case TargetOpcode::G_TRUNC: {
+    if (TypeIdx != 1)
+      return UnableToLegalize;
+
+    uint64_t SizeOp1 = MRI.getType(MI.getOperand(1).getReg()).getSizeInBits();
+    if (NarrowTy.getSizeInBits() * 2 != SizeOp1) {
+      LLVM_DEBUG(dbgs() << "Can't narrow trunc to type " << NarrowTy << "\n");
+      return UnableToLegalize;
+    }
+
+    auto Unmerge = MIRBuilder.buildUnmerge(NarrowTy, MI.getOperand(1).getReg());
+    MIRBuilder.buildCopy(MI.getOperand(0).getReg(), Unmerge.getReg(0));
+    MI.eraseFromParent();
+    return Legalized;
+  }
 
   case TargetOpcode::G_ADD: {
     // FIXME: add support for when SizeOp0 isn't an exact multiple of
@@ -628,15 +662,17 @@ LegalizerHelper::LegalizeResult LegalizerHelper::narrowScalar(MachineInstr &MI,
     extractParts(MI.getOperand(1).getReg(), NarrowTy, NumParts, Src1Regs);
     extractParts(MI.getOperand(2).getReg(), NarrowTy, NumParts, Src2Regs);
 
-    Register CarryIn = MRI.createGenericVirtualRegister(LLT::scalar(1));
-    MIRBuilder.buildConstant(CarryIn, 0);
-
+    Register CarryIn;
     for (int i = 0; i < NumParts; ++i) {
       Register DstReg = MRI.createGenericVirtualRegister(NarrowTy);
       Register CarryOut = MRI.createGenericVirtualRegister(LLT::scalar(1));
 
-      MIRBuilder.buildUAdde(DstReg, CarryOut, Src1Regs[i],
-                            Src2Regs[i], CarryIn);
+      if (i == 0)
+        MIRBuilder.buildUAddo(DstReg, CarryOut, Src1Regs[i], Src2Regs[i]);
+      else {
+        MIRBuilder.buildUAdde(DstReg, CarryOut, Src1Regs[i],
+                              Src2Regs[i], CarryIn);
+      }
 
       DstRegs.push_back(DstReg);
       CarryIn = CarryOut;
@@ -2118,6 +2154,8 @@ LegalizerHelper::lower(MachineInstr &MI, unsigned TypeIdx, LLT Ty) {
   }
   case G_SHUFFLE_VECTOR:
     return lowerShuffleVector(MI);
+  case G_DYN_STACKALLOC:
+    return lowerDynStackAlloc(MI);
   }
 }
 
@@ -2957,11 +2995,11 @@ LegalizerHelper::narrowScalarShift(MachineInstr &MI, unsigned TypeIdx,
   switch (MI.getOpcode()) {
   case TargetOpcode::G_SHL: {
     // Short: ShAmt < NewBitSize
-    auto LoS = MIRBuilder.buildShl(HalfTy, InH, Amt);
+    auto LoS = MIRBuilder.buildShl(HalfTy, InL, Amt);
 
-    auto OrLHS = MIRBuilder.buildShl(HalfTy, InH, Amt);
-    auto OrRHS = MIRBuilder.buildLShr(HalfTy, InL, AmtLack);
-    auto HiS = MIRBuilder.buildOr(HalfTy, OrLHS, OrRHS);
+    auto LoOr = MIRBuilder.buildLShr(HalfTy, InL, AmtLack);
+    auto HiOr = MIRBuilder.buildShl(HalfTy, InH, Amt);
+    auto HiS = MIRBuilder.buildOr(HalfTy, LoOr, HiOr);
 
     // Long: ShAmt >= NewBitSize
     auto LoL = MIRBuilder.buildConstant(HalfTy, 0);         // Lo part is zero.
@@ -2975,41 +3013,25 @@ LegalizerHelper::narrowScalarShift(MachineInstr &MI, unsigned TypeIdx,
     ResultRegs[1] = Hi.getReg(0);
     break;
   }
-  case TargetOpcode::G_LSHR: {
-    // Short: ShAmt < NewBitSize
-    auto HiS = MIRBuilder.buildLShr(HalfTy, InH, Amt);
-
-    auto OrLHS = MIRBuilder.buildLShr(HalfTy, InL, Amt);
-    auto OrRHS = MIRBuilder.buildShl(HalfTy, InH, AmtLack);
-    auto LoS = MIRBuilder.buildOr(HalfTy, OrLHS, OrRHS);
-
-    // Long: ShAmt >= NewBitSize
-    auto HiL = MIRBuilder.buildConstant(HalfTy, 0);          // Hi part is zero.
-    auto LoL = MIRBuilder.buildLShr(HalfTy, InH, AmtExcess); // Lo from Hi part.
-
-    auto Lo = MIRBuilder.buildSelect(
-        HalfTy, IsZero, InL, MIRBuilder.buildSelect(HalfTy, IsShort, LoS, LoL));
-    auto Hi = MIRBuilder.buildSelect(HalfTy, IsShort, HiS, HiL);
-
-    ResultRegs[0] = Lo.getReg(0);
-    ResultRegs[1] = Hi.getReg(0);
-    break;
-  }
+  case TargetOpcode::G_LSHR:
   case TargetOpcode::G_ASHR: {
     // Short: ShAmt < NewBitSize
-    auto HiS = MIRBuilder.buildAShr(HalfTy, InH, Amt);
+    auto HiS = MIRBuilder.buildInstr(MI.getOpcode(), {HalfTy}, {InH, Amt});
 
-    auto OrLHS = MIRBuilder.buildLShr(HalfTy, InL, Amt);
-    auto OrRHS = MIRBuilder.buildLShr(HalfTy, InH, AmtLack);
-    auto LoS = MIRBuilder.buildOr(HalfTy, OrLHS, OrRHS);
+    auto LoOr = MIRBuilder.buildLShr(HalfTy, InL, Amt);
+    auto HiOr = MIRBuilder.buildShl(HalfTy, InH, AmtLack);
+    auto LoS = MIRBuilder.buildOr(HalfTy, LoOr, HiOr);
 
     // Long: ShAmt >= NewBitSize
-
-    // Sign of Hi part.
-    auto HiL = MIRBuilder.buildAShr(
-        HalfTy, InH, MIRBuilder.buildConstant(ShiftAmtTy, NewBitSize - 1));
-
-    auto LoL = MIRBuilder.buildAShr(HalfTy, InH, AmtExcess); // Lo from Hi part.
+    MachineInstrBuilder HiL;
+    if (MI.getOpcode() == TargetOpcode::G_LSHR) {
+      HiL = MIRBuilder.buildConstant(HalfTy, 0);            // Hi part is zero.
+    } else {
+      auto ShiftAmt = MIRBuilder.buildConstant(ShiftAmtTy, NewBitSize - 1);
+      HiL = MIRBuilder.buildAShr(HalfTy, InH, ShiftAmt);    // Sign of Hi part.
+    }
+    auto LoL = MIRBuilder.buildInstr(MI.getOpcode(), {HalfTy},
+                                     {InH, AmtExcess});     // Lo from Hi part.
 
     auto Lo = MIRBuilder.buildSelect(
         HalfTy, IsZero, InL, MIRBuilder.buildSelect(HalfTy, IsShort, LoS, LoL));
@@ -3111,6 +3133,26 @@ LegalizerHelper::moreElementsVector(MachineInstr &MI, unsigned TypeIdx,
     moreElementsVectorDst(MI, MoreTy, 0);
     Observer.changedInstr(MI);
     return Legalized;
+  case TargetOpcode::G_UNMERGE_VALUES: {
+    if (TypeIdx != 1)
+      return UnableToLegalize;
+
+    LLT DstTy = MRI.getType(MI.getOperand(0).getReg());
+    int NumDst = MI.getNumOperands() - 1;
+    moreElementsVectorSrc(MI, MoreTy, NumDst);
+
+    auto MIB = MIRBuilder.buildInstr(TargetOpcode::G_UNMERGE_VALUES);
+    for (int I = 0; I != NumDst; ++I)
+      MIB.addDef(MI.getOperand(I).getReg());
+
+    int NewNumDst = MoreTy.getSizeInBits() / DstTy.getSizeInBits();
+    for (int I = NumDst; I != NewNumDst; ++I)
+      MIB.addDef(MRI.createGenericVirtualRegister(DstTy));
+
+    MIB.addUse(MI.getOperand(NumDst).getReg());
+    MI.eraseFromParent();
+    return Legalized;
+  }
   case TargetOpcode::G_PHI:
     return moreElementsVectorPhi(MI, TypeIdx, MoreTy);
   default:
@@ -3871,6 +3913,41 @@ LegalizerHelper::lowerShuffleVector(MachineInstr &MI) {
   }
 
   MIRBuilder.buildBuildVector(DstReg, BuildVec);
+  MI.eraseFromParent();
+  return Legalized;
+}
+
+LegalizerHelper::LegalizeResult
+LegalizerHelper::lowerDynStackAlloc(MachineInstr &MI) {
+  Register Dst = MI.getOperand(0).getReg();
+  Register AllocSize = MI.getOperand(1).getReg();
+  unsigned Align = MI.getOperand(2).getImm();
+
+  const auto &MF = *MI.getMF();
+  const auto &TLI = *MF.getSubtarget().getTargetLowering();
+
+  LLT PtrTy = MRI.getType(Dst);
+  LLT IntPtrTy = LLT::scalar(PtrTy.getSizeInBits());
+
+  Register SPReg = TLI.getStackPointerRegisterToSaveRestore();
+  auto SPTmp = MIRBuilder.buildCopy(PtrTy, SPReg);
+  SPTmp = MIRBuilder.buildCast(IntPtrTy, SPTmp);
+
+  // Subtract the final alloc from the SP. We use G_PTRTOINT here so we don't
+  // have to generate an extra instruction to negate the alloc and then use
+  // G_GEP to add the negative offset.
+  auto Alloc = MIRBuilder.buildSub(IntPtrTy, SPTmp, AllocSize);
+  if (Align) {
+    APInt AlignMask(IntPtrTy.getSizeInBits(), Align, true);
+    AlignMask.negate();
+    auto AlignCst = MIRBuilder.buildConstant(IntPtrTy, AlignMask);
+    Alloc = MIRBuilder.buildAnd(IntPtrTy, Alloc, AlignCst);
+  }
+
+  SPTmp = MIRBuilder.buildCast(PtrTy, Alloc);
+  MIRBuilder.buildCopy(SPReg, SPTmp);
+  MIRBuilder.buildCopy(Dst, SPTmp);
+
   MI.eraseFromParent();
   return Legalized;
 }

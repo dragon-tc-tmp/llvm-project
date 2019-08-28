@@ -225,8 +225,12 @@ def parseOptionsAndInitTestdirs():
     platform_system = platform.system()
     platform_machine = platform.machine()
 
-    parser = dotest_args.create_parser()
-    args = dotest_args.parse_args(parser, sys.argv[1:])
+    try:
+        parser = dotest_args.create_parser()
+        args = dotest_args.parse_args(parser, sys.argv[1:])
+    except:
+        print(' '.join(sys.argv))
+        raise
 
     if args.unset_env_varnames:
         for env_var in args.unset_env_varnames:
@@ -342,15 +346,14 @@ def parseOptionsAndInitTestdirs():
         configuration.skipCategories += test_categories.validate(
             args.skipCategories, False)
 
-    cflags_extras = ""
     if args.E:
-        cflags_extras += args.E
+        os.environ['CFLAGS_EXTRAS'] = args.E
 
     if args.dwarf_version:
         configuration.dwarf_version = args.dwarf_version
-        cflags_extras += '-gdwarf-{}'.format(args.dwarf_version)
-
-    os.environ['CFLAGS_EXTRAS'] = cflags_extras
+        # We cannot modify CFLAGS_EXTRAS because they're used in test cases
+        # that explicitly require no debug info.
+        os.environ['CFLAGS'] = '-gdwarf-{}'.format(configuration.dwarf_version)
 
     if args.d:
         sys.stdout.write(
@@ -363,9 +366,6 @@ def parseOptionsAndInitTestdirs():
         if any([x.startswith('-') for x in args.f]):
             usage(parser)
         configuration.filters.extend(args.f)
-
-    if args.l:
-        configuration.skip_long_running_test = False
 
     if args.framework:
         configuration.lldbFrameworkPath = args.framework
@@ -428,15 +428,6 @@ def parseOptionsAndInitTestdirs():
 
     if args.results_file:
         configuration.results_filename = args.results_file
-
-    if args.results_port:
-        configuration.results_port = args.results_port
-
-    if args.results_file and args.results_port:
-        sys.stderr.write(
-            "only one of --results-file and --results-port should "
-            "be specified\n")
-        usage(args)
 
     if args.results_formatter:
         configuration.results_formatter_name = args.results_formatter
@@ -516,7 +507,6 @@ def setupTestResults():
     formatter_config.formatter_name = configuration.results_formatter_name
     formatter_config.formatter_options = (
         configuration.results_formatter_options)
-    formatter_config.port = configuration.results_port
 
     # Create the results formatter.
     formatter_spec = formatter.create_results_formatter(
@@ -1140,10 +1130,6 @@ def run_suite():
 
     setupSysPath()
 
-    #
-    # If '-l' is specified, do not skip the long running tests.
-    if not configuration.skip_long_running_test:
-        os.environ["LLDB_SKIP_LONG_RUNNING_TEST"] = "NO"
 
     # For the time being, let's bracket the test runner within the
     # lldb.SBDebugger.Initialize()/Terminate() pair.
@@ -1351,12 +1337,6 @@ def run_suite():
             sys.stderr.write(
                 "%s - %d\n" %
                 (category, configuration.failuresPerCategory[category]))
-
-    # Terminate the test suite if ${LLDB_TESTSUITE_FORCE_FINISH} is defined.
-    # This should not be necessary now.
-    if ("LLDB_TESTSUITE_FORCE_FINISH" in os.environ):
-        print("Terminating Test suite...")
-        subprocess.Popen(["/bin/sh", "-c", "kill %s; exit 0" % (os.getpid())])
 
     # Exiting.
     exitTestSuite(configuration.failed)
