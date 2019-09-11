@@ -241,8 +241,11 @@ def FeatureCLDEMOTE  : SubtargetFeature<"cldemote", "HasCLDEMOTE", "true",
                                       "Enable Cache Demote">;
 def FeaturePTWRITE  : SubtargetFeature<"ptwrite", "HasPTWRITE", "true",
                                       "Support ptwrite instruction">;
-def FeatureMPX     : SubtargetFeature<"mpx", "HasMPX", "true",
-                                      "Support MPX instructions">;
+// FIXME: This feature is deprecated in 10.0 and should not be used for
+// anything, but removing it would break IR files that may contain it in a
+// target-feature attribute.
+def FeatureDeprecatedMPX : SubtargetFeature<"mpx", "DeprecatedHasMPX", "false",
+                                      "Deprecated. Support MPX instructions">;
 def FeatureLEAForSP : SubtargetFeature<"lea-sp", "UseLeaForSP", "true",
                                      "Use LEA for adjusting the stack pointer">;
 def FeatureSlowDivide32 : SubtargetFeature<"idivl-to-divb",
@@ -374,6 +377,10 @@ def FeatureMacroFusion
 def FeatureHasFastGather
     : SubtargetFeature<"fast-gather", "HasFastGather", "true",
                        "Indicates if gather is reasonably fast">;
+
+def FeaturePrefer128Bit
+    : SubtargetFeature<"prefer-128-bit", "Prefer128Bit", "true",
+                       "Prefer 128-bit AVX instructions">;
 
 def FeaturePrefer256Bit
     : SubtargetFeature<"prefer-256-bit", "Prefer256Bit", "true",
@@ -580,7 +587,6 @@ def ProcessorFeatures {
 
   // Skylake
   list<SubtargetFeature> SKLAdditionalFeatures = [FeatureAES,
-                                                  FeatureMPX,
                                                   FeatureXSAVEC,
                                                   FeatureXSAVES,
                                                   FeatureCLFLUSHOPT,
@@ -719,7 +725,6 @@ def ProcessorFeatures {
 
   // Goldmont
   list<SubtargetFeature> GLMAdditionalFeatures = [FeatureAES,
-                                                  FeatureMPX,
                                                   FeatureSHA,
                                                   FeatureRDSEED,
                                                   FeatureXSAVE,

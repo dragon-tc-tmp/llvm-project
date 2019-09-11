@@ -524,17 +524,16 @@ private:
 
     PathDiagnosticPieceRef VisitNode(const ExplodedNode *N,
                                      BugReporterContext &BRC,
-                                     BugReport &BR) override;
+                                     PathSensitiveBugReport &BR) override;
 
     PathDiagnosticPieceRef getEndPath(BugReporterContext &BRC,
                                       const ExplodedNode *EndPathNode,
-                                      BugReport &BR) override {
+                                      PathSensitiveBugReport &BR) override {
       if (!IsLeak)
         return nullptr;
 
       PathDiagnosticLocation L =
-        PathDiagnosticLocation::createEndOfPath(EndPathNode,
-                                                BRC.getSourceManager());
+          PathDiagnosticLocation::createEndOfPath(EndPathNode);
       // Do not add the statement itself as a range in case of leak.
       return std::make_shared<PathDiagnosticEventPiece>(L, BR.getDescription(),
                                                          false);
@@ -1132,14 +1131,13 @@ ProgramStateRef MallocChecker::addExtentSize(CheckerContext &C,
     // Store the extent size for the (symbolic)region
     // containing the elements.
     Region = Target.getAsRegion()
-                 ->getAs<SubRegion>()
+                 ->castAs<SubRegion>()
                  ->StripCasts()
-                 ->getAs<SubRegion>();
+                 ->castAs<SubRegion>();
   } else {
     ElementCount = svalBuilder.makeIntVal(1, true);
-    Region = Target.getAsRegion()->getAs<SubRegion>();
+    Region = Target.getAsRegion()->castAs<SubRegion>();
   }
-  assert(Region);
 
   // Set the region's extent equal to the Size in Bytes.
   QualType ElementType = NE->getAllocatedType();
@@ -1823,7 +1821,8 @@ void MallocChecker::ReportBadFree(CheckerContext &C, SVal ArgVal,
 
     printExpectedAllocName(os, C, DeallocExpr);
 
-    auto R = std::make_unique<BugReport>(*BT_BadFree[*CheckKind], os.str(), N);
+    auto R = std::make_unique<PathSensitiveBugReport>(*BT_BadFree[*CheckKind],
+                                                      os.str(), N);
     R->markInteresting(MR);
     R->addRange(Range);
     C.emitReport(std::move(R));
@@ -1847,7 +1846,7 @@ void MallocChecker::ReportFreeAlloca(CheckerContext &C, SVal ArgVal,
       BT_FreeAlloca[*CheckKind].reset(new BugType(
           CheckNames[*CheckKind], "Free alloca()", categories::MemoryError));
 
-    auto R = std::make_unique<BugReport>(
+    auto R = std::make_unique<PathSensitiveBugReport>(
         *BT_FreeAlloca[*CheckKind],
         "Memory allocated by alloca() should not be deallocated", N);
     R->markInteresting(ArgVal.getAsRegion());
@@ -1903,7 +1902,8 @@ void MallocChecker::ReportMismatchedDealloc(CheckerContext &C,
         os << ", not " << DeallocOs.str();
     }
 
-    auto R = std::make_unique<BugReport>(*BT_MismatchedDealloc, os.str(), N);
+    auto R = std::make_unique<PathSensitiveBugReport>(*BT_MismatchedDealloc,
+                                                      os.str(), N);
     R->markInteresting(Sym);
     R->addRange(Range);
     R->addVisitor(std::make_unique<MallocBugVisitor>(Sym));
@@ -1962,7 +1962,8 @@ void MallocChecker::ReportOffsetFree(CheckerContext &C, SVal ArgVal,
   else
     os << "allocated memory";
 
-  auto R = std::make_unique<BugReport>(*BT_OffsetFree[*CheckKind], os.str(), N);
+  auto R = std::make_unique<PathSensitiveBugReport>(*BT_OffsetFree[*CheckKind],
+                                                    os.str(), N);
   R->markInteresting(MR->getBaseRegion());
   R->addRange(Range);
   C.emitReport(std::move(R));
@@ -1988,10 +1989,11 @@ void MallocChecker::ReportUseAfterFree(CheckerContext &C, SourceRange Range,
     AllocationFamily AF =
         C.getState()->get<RegionState>(Sym)->getAllocationFamily();
 
-    auto R = std::make_unique<BugReport>(*BT_UseFree[*CheckKind],
+    auto R = std::make_unique<PathSensitiveBugReport>(
+        *BT_UseFree[*CheckKind],
         AF == AF_InnerBuffer
-              ? "Inner pointer of container used after re/deallocation"
-              : "Use of memory after it is freed",
+            ? "Inner pointer of container used after re/deallocation"
+            : "Use of memory after it is freed",
         N);
 
     R->markInteresting(Sym);
@@ -2022,7 +2024,7 @@ void MallocChecker::ReportDoubleFree(CheckerContext &C, SourceRange Range,
       BT_DoubleFree[*CheckKind].reset(new BugType(
           CheckNames[*CheckKind], "Double free", categories::MemoryError));
 
-    auto R = std::make_unique<BugReport>(
+    auto R = std::make_unique<PathSensitiveBugReport>(
         *BT_DoubleFree[*CheckKind],
         (Released ? "Attempt to free released memory"
                   : "Attempt to free non-owned memory"),
@@ -2051,7 +2053,7 @@ void MallocChecker::ReportDoubleDelete(CheckerContext &C, SymbolRef Sym) const {
                                         "Double delete",
                                         categories::MemoryError));
 
-    auto R = std::make_unique<BugReport>(
+    auto R = std::make_unique<PathSensitiveBugReport>(
         *BT_DoubleDelete, "Attempt to delete released memory", N);
 
     R->markInteresting(Sym);
@@ -2079,8 +2081,8 @@ void MallocChecker::ReportUseZeroAllocated(CheckerContext &C,
           new BugType(CheckNames[*CheckKind], "Use of zero allocated",
                       categories::MemoryError));
 
-    auto R = std::make_unique<BugReport>(*BT_UseZerroAllocated[*CheckKind],
-                                         "Use of zero-allocated memory", N);
+    auto R = std::make_unique<PathSensitiveBugReport>(
+        *BT_UseZerroAllocated[*CheckKind], "Use of zero-allocated memory", N);
 
     R->addRange(Range);
     if (Sym) {
@@ -2119,7 +2121,8 @@ void MallocChecker::ReportFunctionPointerFree(CheckerContext &C, SVal ArgVal,
 
     Os << " is a function pointer";
 
-    auto R = std::make_unique<BugReport>(*BT_BadFree[*CheckKind], Os.str(), N);
+    auto R = std::make_unique<PathSensitiveBugReport>(*BT_BadFree[*CheckKind],
+                                                      Os.str(), N);
     R->markInteresting(MR);
     R->addRange(Range);
     C.emitReport(std::move(R));
@@ -2344,7 +2347,7 @@ void MallocChecker::reportLeak(SymbolRef Sym, ExplodedNode *N,
     os << "Potential memory leak";
   }
 
-  auto R = std::make_unique<BugReport>(
+  auto R = std::make_unique<PathSensitiveBugReport>(
       *BT_Leak[*CheckKind], os.str(), N, LocUsedForUniqueing,
       AllocNode->getLocationContext()->getDecl());
   R->markInteresting(Sym);
@@ -2906,8 +2909,10 @@ static bool isReferenceCountingPointerDestructor(const CXXDestructorDecl *DD) {
   return false;
 }
 
-PathDiagnosticPieceRef MallocChecker::MallocBugVisitor::VisitNode(
-    const ExplodedNode *N, BugReporterContext &BRC, BugReport &BR) {
+PathDiagnosticPieceRef
+MallocChecker::MallocBugVisitor::VisitNode(const ExplodedNode *N,
+                                           BugReporterContext &BRC,
+                                           PathSensitiveBugReport &BR) {
 
   ProgramStateRef state = N->getState();
   ProgramStateRef statePrev = N->getFirstPred()->getState();
@@ -3066,8 +3071,12 @@ PathDiagnosticPieceRef MallocChecker::MallocBugVisitor::VisitNode(
     }
   }
 
-  if (Msg.empty())
+  if (Msg.empty()) {
+    // Silence a memory leak warning by MallocChecker in MallocChecker.cpp :)
+    assert(!StackHint && "Memory leak!");
     return nullptr;
+  }
+
   assert(StackHint);
 
   // Generate the extra diagnostic.

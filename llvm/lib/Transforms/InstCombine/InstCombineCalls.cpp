@@ -2258,9 +2258,11 @@ Instruction *InstCombiner::visitCallInst(CallInst &CI) {
       return II;
     }
 
-    // fma x, 1, z -> fadd x, z
-    if (match(Src1, m_FPOne())) {
-      auto *FAdd = BinaryOperator::CreateFAdd(Src0, II->getArgOperand(2));
+    // Try to simplify the underlying FMul.
+    if (Value *V = SimplifyFMulInst(II->getArgOperand(0), II->getArgOperand(1),
+                                    II->getFastMathFlags(),
+                                    SQ.getWithInstruction(II))) {
+      auto *FAdd = BinaryOperator::CreateFAdd(V, II->getArgOperand(2));
       FAdd->copyFastMathFlags(II);
       return FAdd;
     }
@@ -4178,8 +4180,43 @@ static IntrinsicInst *findInitTrampoline(Value *Callee) {
   return nullptr;
 }
 
+static void annotateAnyAllocSite(CallBase &Call, const TargetLibraryInfo *TLI) {
+  ConstantInt *Op0C = dyn_cast<ConstantInt>(Call.getOperand(0));
+  ConstantInt *Op1C = (Call.getNumArgOperands() == 1)
+                          ? nullptr
+                          : dyn_cast<ConstantInt>(Call.getOperand(1));
+  // Bail out if the allocation size is zero.
+  if ((Op0C && Op0C->isNullValue()) || (Op1C && Op1C->isNullValue()))
+    return;
+
+  if (isMallocLikeFn(&Call, TLI) && Op0C) {
+    Call.addAttribute(AttributeList::ReturnIndex,
+                      Attribute::getWithDereferenceableOrNullBytes(
+                          Call.getContext(), Op0C->getZExtValue()));
+  } else if (isOpNewLikeFn(&Call, TLI) && Op0C) {
+    Call.addAttribute(AttributeList::ReturnIndex,
+                      Attribute::getWithDereferenceableBytes(
+                          Call.getContext(), Op0C->getZExtValue()));
+  } else if (isReallocLikeFn(&Call, TLI) && Op1C) {
+    Call.addAttribute(AttributeList::ReturnIndex,
+                      Attribute::getWithDereferenceableOrNullBytes(
+                          Call.getContext(), Op1C->getZExtValue()));
+  } else if (isCallocLikeFn(&Call, TLI) && Op0C && Op1C) {
+    bool Overflow;
+    const APInt &N = Op0C->getValue();
+    APInt Size = N.umul_ov(Op1C->getValue(), Overflow);
+    if (!Overflow)
+      Call.addAttribute(AttributeList::ReturnIndex,
+                        Attribute::getWithDereferenceableOrNullBytes(
+                            Call.getContext(), Size.getZExtValue()));
+  }
+}
+
 /// Improvements for call, callbr and invoke instructions.
 Instruction *InstCombiner::visitCallBase(CallBase &Call) {
+  if (isAllocationFn(&Call, &TLI))
+    annotateAnyAllocSite(Call, &TLI);
+
   if (isAllocLikeFn(&Call, &TLI))
     return visitAllocSite(Call);
 
