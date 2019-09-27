@@ -99,12 +99,14 @@ namespace lldb {
 // namespace. This allows you to attach with a debugger and call this function
 // and get the packet history dumped to a file.
 void DumpProcessGDBRemotePacketHistory(void *p, const char *path) {
-  StreamFile strm;
-  Status error = FileSystem::Instance().Open(strm.GetFile(), FileSpec(path),
-                                             File::eOpenOptionWrite |
-                                                 File::eOpenOptionCanCreate);
-  if (error.Success())
-    ((ProcessGDBRemote *)p)->GetGDBRemote().DumpHistory(strm);
+  auto file = FileSystem::Instance().Open(
+      FileSpec(path), File::eOpenOptionWrite | File::eOpenOptionCanCreate);
+  if (!file) {
+    llvm::consumeError(file.takeError());
+    return;
+  }
+  StreamFile stream(std::move(file.get()));
+  ((ProcessGDBRemote *)p)->GetGDBRemote().DumpHistory(stream);
 }
 } // namespace lldb
 
@@ -163,45 +165,6 @@ static const ProcessKDPPropertiesSP &GetGlobalPluginProperties() {
     g_settings_sp = std::make_shared<PluginProperties>();
   return g_settings_sp;
 }
-
-class ProcessGDBRemoteProvider
-    : public repro::Provider<ProcessGDBRemoteProvider> {
-public:
-  struct Info {
-    static const char *name;
-    static const char *file;
-  };
-
-  ProcessGDBRemoteProvider(const FileSpec &directory) : Provider(directory) {
-  }
-
-  raw_ostream *GetHistoryStream() {
-    FileSpec history_file = GetRoot().CopyByAppendingPathComponent(Info::file);
-
-    std::error_code EC;
-    m_stream_up = std::make_unique<raw_fd_ostream>(
-        history_file.GetPath(), EC, sys::fs::OpenFlags::OF_Text);
-    return m_stream_up.get();
-  }
-
-  void SetCallback(std::function<void()> callback) {
-    m_callback = std::move(callback);
-  }
-
-  void Keep() override { m_callback(); }
-
-  void Discard() override { m_callback(); }
-
-  static char ID;
-
-private:
-  std::function<void()> m_callback;
-  std::unique_ptr<raw_fd_ostream> m_stream_up;
-};
-
-char ProcessGDBRemoteProvider::ID = 0;
-const char *ProcessGDBRemoteProvider::Info::name = "gdb-remote";
-const char *ProcessGDBRemoteProvider::Info::file = "gdb-remote.yaml";
 
 } // namespace
 
@@ -312,8 +275,8 @@ ProcessGDBRemote::ProcessGDBRemote(lldb::TargetSP target_sp,
                                    "async thread did exit");
 
   if (repro::Generator *g = repro::Reproducer::Instance().GetGenerator()) {
-    ProcessGDBRemoteProvider &provider =
-        g->GetOrCreate<ProcessGDBRemoteProvider>();
+    repro::ProcessGDBRemoteProvider &provider =
+        g->GetOrCreate<repro::ProcessGDBRemoteProvider>();
     // Set the history stream to the stream owned by the provider.
     m_gdb_comm.SetHistoryStream(provider.GetHistoryStream());
     // Make sure to clear the stream again when we're finished.
@@ -3423,7 +3386,8 @@ Status ProcessGDBRemote::ConnectToReplayServer(repro::Loader *loader) {
     return Status("No loader provided.");
 
   // Construct replay history path.
-  FileSpec history_file = loader->GetFile<ProcessGDBRemoteProvider::Info>();
+  FileSpec history_file =
+      loader->GetFile<repro::ProcessGDBRemoteProvider::Info>();
   if (!history_file)
     return Status("No provider for gdb-remote.");
 

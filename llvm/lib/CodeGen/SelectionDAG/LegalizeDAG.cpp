@@ -503,8 +503,8 @@ void SelectionDAGLegalize::LegalizeStoreOps(SDNode *Node) {
       // expand it.
       EVT MemVT = ST->getMemoryVT();
       const DataLayout &DL = DAG.getDataLayout();
-      if (!TLI.allowsMemoryAccess(*DAG.getContext(), DL, MemVT,
-                                  *ST->getMemOperand())) {
+      if (!TLI.allowsMemoryAccessForAlignment(*DAG.getContext(), DL, MemVT,
+                                              *ST->getMemOperand())) {
         LLVM_DEBUG(dbgs() << "Expanding unsupported unaligned store\n");
         SDValue Result = TLI.expandUnalignedStore(ST, DAG);
         ReplaceNode(SDValue(ST, 0), Result);
@@ -618,8 +618,8 @@ void SelectionDAGLegalize::LegalizeStoreOps(SDNode *Node) {
       EVT MemVT = ST->getMemoryVT();
       // If this is an unaligned store and the target doesn't support it,
       // expand it.
-      if (!TLI.allowsMemoryAccess(*DAG.getContext(), DL, MemVT,
-                                  *ST->getMemOperand())) {
+      if (!TLI.allowsMemoryAccessForAlignment(*DAG.getContext(), DL, MemVT,
+                                              *ST->getMemOperand())) {
         SDValue Result = TLI.expandUnalignedStore(ST, DAG);
         ReplaceNode(SDValue(ST, 0), Result);
       }
@@ -679,8 +679,8 @@ void SelectionDAGLegalize::LegalizeLoadOps(SDNode *Node) {
       const DataLayout &DL = DAG.getDataLayout();
       // If this is an unaligned load and the target doesn't support it,
       // expand it.
-      if (!TLI.allowsMemoryAccess(*DAG.getContext(), DL, MemVT,
-                                  *LD->getMemOperand())) {
+      if (!TLI.allowsMemoryAccessForAlignment(*DAG.getContext(), DL, MemVT,
+                                              *LD->getMemOperand())) {
         std::tie(RVal, RChain) = TLI.expandUnalignedLoad(LD, DAG);
       }
       break;
@@ -968,15 +968,13 @@ void SelectionDAGLegalize::LegalizeOp(SDNode *Node) {
 
 #ifndef NDEBUG
   for (unsigned i = 0, e = Node->getNumValues(); i != e; ++i)
-    assert((TLI.getTypeAction(*DAG.getContext(), Node->getValueType(i)) ==
-              TargetLowering::TypeLegal ||
-            TLI.isTypeLegal(Node->getValueType(i))) &&
+    assert(TLI.getTypeAction(*DAG.getContext(), Node->getValueType(i)) ==
+             TargetLowering::TypeLegal &&
            "Unexpected illegal type!");
 
   for (const SDValue &Op : Node->op_values())
     assert((TLI.getTypeAction(*DAG.getContext(), Op.getValueType()) ==
               TargetLowering::TypeLegal ||
-            TLI.isTypeLegal(Op.getValueType()) ||
             Op.getOpcode() == ISD::TargetConstant ||
             Op.getOpcode() == ISD::Register) &&
             "Unexpected illegal type!");

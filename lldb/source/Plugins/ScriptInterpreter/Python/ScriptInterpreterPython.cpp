@@ -45,6 +45,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/FormatAdapters.h"
 
 #include <memory>
 #include <mutex>
@@ -609,12 +610,14 @@ ScriptInterpreterPythonImpl::CreateInstance(Debugger &debugger) {
   return std::make_shared<ScriptInterpreterPythonImpl>(debugger);
 }
 
-void ScriptInterpreterPythonImpl::ResetOutputFileHandle(FILE *fh) {}
-
 void ScriptInterpreterPythonImpl::LeaveSession() {
   Log *log(lldb_private::GetLogIfAllCategoriesSet(LIBLLDB_LOG_SCRIPT));
   if (log)
     log->PutCString("ScriptInterpreterPythonImpl::LeaveSession()");
+
+  // Unset the LLDB global variables.
+  PyRun_SimpleString("lldb.debugger = None; lldb.target = None; lldb.process "
+                     "= None; lldb.thread = None; lldb.frame = None");
 
   // checking that we have a valid thread state - since we use our own
   // threading and locking in some (rare) cases during cleanup Python may end
@@ -899,17 +902,24 @@ bool ScriptInterpreterPythonImpl::ExecuteOneLine(
         debugger.AdoptTopIOHandlerFilesIfInvalid(input_file_sp, output_file_sp,
                                                  error_file_sp);
     } else {
-      input_file_sp = std::make_shared<StreamFile>();
-      FileSystem::Instance().Open(input_file_sp->GetFile(),
+      auto nullin = FileSystem::Instance().Open(
                                   FileSpec(FileSystem::DEV_NULL),
                                   File::eOpenOptionRead);
-
-      output_file_sp = std::make_shared<StreamFile>();
-      FileSystem::Instance().Open(output_file_sp->GetFile(),
+      auto nullout = FileSystem::Instance().Open(
                                   FileSpec(FileSystem::DEV_NULL),
                                   File::eOpenOptionWrite);
-
-      error_file_sp = output_file_sp;
+      if (!nullin) {
+        result->AppendErrorWithFormatv("failed to open /dev/null: {0}\n",
+                                       llvm::fmt_consume(nullin.takeError()));
+        return false;
+      }
+      if (!nullout) {
+        result->AppendErrorWithFormatv("failed to open /dev/null: {0}\n",
+                                       llvm::fmt_consume(nullout.takeError()));
+        return false;
+      }
+      input_file_sp = std::make_shared<StreamFile>(std::move(nullin.get()));
+      error_file_sp = output_file_sp = std::make_shared<StreamFile>(std::move(nullout.get()));
     }
 
     FILE *in_file = input_file_sp->GetFile().GetStream();
@@ -2210,18 +2220,6 @@ bool ScriptInterpreterPythonImpl::GetScriptedSummary(
     callee_wrapper_sp = std::make_shared<StructuredPythonObject>(new_callee);
 
   return ret_val;
-}
-
-void ScriptInterpreterPythonImpl::Clear() {
-  // Release any global variables that might have strong references to
-  // LLDB objects when clearing the python script interpreter.
-  Locker locker(this, Locker::AcquireLock, Locker::FreeAcquiredLock);
-
-  // This may be called as part of Py_Finalize.  In that case the modules are
-  // destroyed in random order and we can't guarantee that we can access these.
-  if (Py_IsInitialized())
-    PyRun_SimpleString("lldb.debugger = None; lldb.target = None; lldb.process "
-                       "= None; lldb.thread = None; lldb.frame = None");
 }
 
 bool ScriptInterpreterPythonImpl::BreakpointCallbackFunction(

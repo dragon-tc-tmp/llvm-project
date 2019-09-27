@@ -2234,6 +2234,15 @@ Instruction *InstCombiner::visitCallInst(CallInst &CI) {
       return replaceInstUsesWith(*II, Add);
     }
 
+    // Try to simplify the underlying FMul.
+    if (Value *V = SimplifyFMulInst(II->getArgOperand(0), II->getArgOperand(1),
+                                    II->getFastMathFlags(),
+                                    SQ.getWithInstruction(II))) {
+      auto *FAdd = BinaryOperator::CreateFAdd(V, II->getArgOperand(2));
+      FAdd->copyFastMathFlags(II);
+      return FAdd;
+    }
+
     LLVM_FALLTHROUGH;
   }
   case Intrinsic::fma: {
@@ -2258,10 +2267,11 @@ Instruction *InstCombiner::visitCallInst(CallInst &CI) {
       return II;
     }
 
-    // Try to simplify the underlying FMul.
-    if (Value *V = SimplifyFMulInst(II->getArgOperand(0), II->getArgOperand(1),
-                                    II->getFastMathFlags(),
-                                    SQ.getWithInstruction(II))) {
+    // Try to simplify the underlying FMul. We can only apply simplifications
+    // that do not require rounding.
+    if (Value *V = SimplifyFMAFMul(II->getArgOperand(0), II->getArgOperand(1),
+                                   II->getFastMathFlags(),
+                                   SQ.getWithInstruction(II))) {
       auto *FAdd = BinaryOperator::CreateFAdd(V, II->getArgOperand(2));
       FAdd->copyFastMathFlags(II);
       return FAdd;
@@ -3953,10 +3963,21 @@ Instruction *InstCombiner::visitCallInst(CallInst &CI) {
     break;
   }
   case Intrinsic::experimental_gc_relocate: {
+    auto &GCR = *cast<GCRelocateInst>(II);
+
+    // If we have two copies of the same pointer in the statepoint argument
+    // list, canonicalize to one.  This may let us common gc.relocates.
+    if (GCR.getBasePtr() == GCR.getDerivedPtr() &&
+        GCR.getBasePtrIndex() != GCR.getDerivedPtrIndex()) {
+      auto *OpIntTy = GCR.getOperand(2)->getType();
+      II->setOperand(2, ConstantInt::get(OpIntTy, GCR.getBasePtrIndex()));
+      return II;
+    }
+    
     // Translate facts known about a pointer before relocating into
     // facts about the relocate value, while being careful to
     // preserve relocation semantics.
-    Value *DerivedPtr = cast<GCRelocateInst>(II)->getDerivedPtr();
+    Value *DerivedPtr = GCR.getDerivedPtr();
 
     // Remove the relocation if unused, note that this check is required
     // to prevent the cases below from looping forever.
@@ -4181,22 +4202,23 @@ static IntrinsicInst *findInitTrampoline(Value *Callee) {
 }
 
 static void annotateAnyAllocSite(CallBase &Call, const TargetLibraryInfo *TLI) {
+  unsigned NumArgs = Call.getNumArgOperands();
   ConstantInt *Op0C = dyn_cast<ConstantInt>(Call.getOperand(0));
-  ConstantInt *Op1C = (Call.getNumArgOperands() == 1)
-                          ? nullptr
-                          : dyn_cast<ConstantInt>(Call.getOperand(1));
+  ConstantInt *Op1C =
+      (NumArgs == 1) ? nullptr : dyn_cast<ConstantInt>(Call.getOperand(1));
   // Bail out if the allocation size is zero.
   if ((Op0C && Op0C->isNullValue()) || (Op1C && Op1C->isNullValue()))
     return;
 
   if (isMallocLikeFn(&Call, TLI) && Op0C) {
-    Call.addAttribute(AttributeList::ReturnIndex,
-                      Attribute::getWithDereferenceableOrNullBytes(
-                          Call.getContext(), Op0C->getZExtValue()));
-  } else if (isOpNewLikeFn(&Call, TLI) && Op0C) {
-    Call.addAttribute(AttributeList::ReturnIndex,
-                      Attribute::getWithDereferenceableBytes(
-                          Call.getContext(), Op0C->getZExtValue()));
+    if (isOpNewLikeFn(&Call, TLI))
+      Call.addAttribute(AttributeList::ReturnIndex,
+                        Attribute::getWithDereferenceableBytes(
+                            Call.getContext(), Op0C->getZExtValue()));
+    else
+      Call.addAttribute(AttributeList::ReturnIndex,
+                        Attribute::getWithDereferenceableOrNullBytes(
+                            Call.getContext(), Op0C->getZExtValue()));
   } else if (isReallocLikeFn(&Call, TLI) && Op1C) {
     Call.addAttribute(AttributeList::ReturnIndex,
                       Attribute::getWithDereferenceableOrNullBytes(
@@ -4209,6 +4231,21 @@ static void annotateAnyAllocSite(CallBase &Call, const TargetLibraryInfo *TLI) {
       Call.addAttribute(AttributeList::ReturnIndex,
                         Attribute::getWithDereferenceableOrNullBytes(
                             Call.getContext(), Size.getZExtValue()));
+  } else if (isStrdupLikeFn(&Call, TLI)) {
+    uint64_t Len = GetStringLength(Call.getOperand(0));
+    if (Len) {
+      // strdup
+      if (NumArgs == 1)
+        Call.addAttribute(AttributeList::ReturnIndex,
+                          Attribute::getWithDereferenceableOrNullBytes(
+                              Call.getContext(), Len));
+      // strndup
+      else if (NumArgs == 2 && Op1C)
+        Call.addAttribute(
+            AttributeList::ReturnIndex,
+            Attribute::getWithDereferenceableOrNullBytes(
+                Call.getContext(), std::min(Len, Op1C->getZExtValue() + 1)));
+    }
   }
 }
 
@@ -4216,9 +4253,6 @@ static void annotateAnyAllocSite(CallBase &Call, const TargetLibraryInfo *TLI) {
 Instruction *InstCombiner::visitCallBase(CallBase &Call) {
   if (isAllocationFn(&Call, &TLI))
     annotateAnyAllocSite(Call, &TLI);
-
-  if (isAllocLikeFn(&Call, &TLI))
-    return visitAllocSite(Call);
 
   bool Changed = false;
 
@@ -4349,6 +4383,9 @@ Instruction *InstCombiner::visitCallBase(CallBase &Call) {
     // the fallthrough check.
     if (I) return eraseInstFromFunction(*I);
   }
+
+  if (isAllocLikeFn(&Call, &TLI))
+    return visitAllocSite(Call);
 
   return Changed ? &Call : nullptr;
 }

@@ -188,8 +188,6 @@ public:
                           const TypeSummaryOptions &options,
                           std::string &retval) override;
 
-  void Clear() override;
-
   bool GetDocumentationForItem(const char *item, std::string &dest) override;
 
   bool GetShortHelpForCommandObject(StructuredData::GenericSP cmd_obj_sp,
@@ -255,8 +253,6 @@ public:
   /// Set a one-liner as the callback for the watchpoint.
   void SetWatchpointCommandCallback(WatchpointOptions *wp_options,
                                     const char *oneliner) override;
-
-  void ResetOutputFileHandle(FILE *new_fh) override;
 
   const char *GetDictionaryName() { return m_dictionary_name.c_str(); }
 

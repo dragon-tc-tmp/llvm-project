@@ -40,18 +40,18 @@ static uint32_t getFlags(const Symbol *Sym) {
 
 TapiFile::TapiFile(MemoryBufferRef Source, const InterfaceFile &interface,
                    Architecture Arch)
-    : SymbolicFile(ID_TapiFile, Source), Arch(Arch) {
+    : SymbolicFile(ID_TapiFile, Source) {
   for (const auto *Symbol : interface.symbols()) {
     if (!Symbol->getArchitectures().has(Arch))
       continue;
 
-    auto Platform = interface.getPlatform();
     switch (Symbol->getKind()) {
     case SymbolKind::GlobalSymbol:
       Symbols.emplace_back(StringRef(), Symbol->getName(), getFlags(Symbol));
       break;
     case SymbolKind::ObjectiveCClass:
-      if (Platform == PlatformKind::macOS && Arch == AK_i386) {
+      if (interface.getPlatforms().count(PlatformKind::macOS) &&
+          Arch == AK_i386) {
         Symbols.emplace_back(ObjC1ClassNamePrefix, Symbol->getName(),
                              getFlags(Symbol));
       } else {

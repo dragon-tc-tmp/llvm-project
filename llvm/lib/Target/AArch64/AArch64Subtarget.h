@@ -200,7 +200,7 @@ protected:
   unsigned MaxPrefetchIterationsAhead = UINT_MAX;
   unsigned PrefFunctionLogAlignment = 0;
   unsigned PrefLoopLogAlignment = 0;
-  unsigned MaxJumpTableSize = 0;
+  unsigned MaxJumpTableTargets = UINT_MAX;
   unsigned WideningBaseCost = 0;
 
   // ReserveXRegister[i] - X#i is not available as a general purpose register.
@@ -364,7 +364,7 @@ public:
   }
   unsigned getPrefLoopLogAlignment() const { return PrefLoopLogAlignment; }
 
-  unsigned getMaximumJumpTableSize() const { return MaxJumpTableSize; }
+  unsigned getMaximumJumpTableTargets() const { return MaxJumpTableTargets; }
 
   unsigned getWideningBaseCost() const { return WideningBaseCost; }
 
@@ -411,6 +411,8 @@ public:
   bool isTargetELF() const { return TargetTriple.isOSBinFormatELF(); }
   bool isTargetMachO() const { return TargetTriple.isOSBinFormatMachO(); }
 
+  bool isTargetILP32() const { return TargetTriple.isArch32Bit(); }
+
   bool useAA() const override { return UseAA; }
 
   bool hasVH() const { return HasVH; }
@@ -436,6 +438,12 @@ public:
   bool hasTLB_RMI() const { return HasTLB_RMI; }
   bool hasFMI() const { return HasFMI; }
   bool hasRCPC_IMMO() const { return HasRCPC_IMMO; }
+
+  bool addrSinkUsingGEPs() const override {
+    // Keeping GEPs inbounds is important for exploiting AArch64
+    // addressing-modes in ILP32 mode.
+    return useAA() || isTargetILP32();
+  }
 
   bool useSmallAddressing() const {
     switch (TLInfo.getTargetMachine().getCodeModel()) {

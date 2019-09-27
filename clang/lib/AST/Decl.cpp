@@ -1558,6 +1558,24 @@ void NamedDecl::printQualifiedName(raw_ostream &OS) const {
 
 void NamedDecl::printQualifiedName(raw_ostream &OS,
                                    const PrintingPolicy &P) const {
+  if (getDeclContext()->isFunctionOrMethod()) {
+    // We do not print '(anonymous)' for function parameters without name.
+    printName(OS);
+    return;
+  }
+  printNestedNameSpecifier(OS, P);
+  if (getDeclName() || isa<DecompositionDecl>(this))
+    OS << *this;
+  else
+    OS << "(anonymous)";
+}
+
+void NamedDecl::printNestedNameSpecifier(raw_ostream &OS) const {
+  printNestedNameSpecifier(OS, getASTContext().getPrintingPolicy());
+}
+
+void NamedDecl::printNestedNameSpecifier(raw_ostream &OS,
+                                         const PrintingPolicy &P) const {
   const DeclContext *Ctx = getDeclContext();
 
   // For ObjC methods and properties, look through categories and use the
@@ -1571,10 +1589,8 @@ void NamedDecl::printQualifiedName(raw_ostream &OS,
         Ctx = ID;
   }
 
-  if (Ctx->isFunctionOrMethod()) {
-    printName(OS);
+  if (Ctx->isFunctionOrMethod())
     return;
-  }
 
   using ContextsTy = SmallVector<const DeclContext *, 8>;
   ContextsTy Contexts;
@@ -1644,11 +1660,6 @@ void NamedDecl::printQualifiedName(raw_ostream &OS,
     }
     OS << "::";
   }
-
-  if (getDeclName() || isa<DecompositionDecl>(this))
-    OS << *this;
-  else
-    OS << "(anonymous)";
 }
 
 void NamedDecl::getNameForDiagnostic(raw_ostream &OS,
@@ -2966,8 +2977,7 @@ bool FunctionDecl::isReplaceableGlobalAllocationFunction(bool *IsAligned) const 
     Ty = Ty->getPointeeType();
     if (Ty.getCVRQualifiers() != Qualifiers::Const)
       return false;
-    const CXXRecordDecl *RD = Ty->getAsCXXRecordDecl();
-    if (RD && isNamed(RD, "nothrow_t") && RD->isInStdNamespace())
+    if (Ty->isNothrowT())
       Consume();
   }
 
@@ -3348,7 +3358,8 @@ SourceRange FunctionDecl::getExceptionSpecSourceRange() const {
 /// an externally visible symbol, but "extern inline" will not create an
 /// externally visible symbol.
 bool FunctionDecl::isInlineDefinitionExternallyVisible() const {
-  assert((doesThisDeclarationHaveABody() || willHaveBody()) &&
+  assert((doesThisDeclarationHaveABody() || willHaveBody() ||
+          hasAttr<AliasAttr>()) &&
          "Must be a function definition");
   assert(isInlined() && "Function must be inline");
   ASTContext &Context = getASTContext();

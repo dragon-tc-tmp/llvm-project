@@ -1480,7 +1480,10 @@ int X86TTIImpl::getCastInstrCost(unsigned Opcode, Type *Dst, Type *Src,
     { ISD::TRUNCATE,    MVT::v4i8,  MVT::v4i64,  4 },
     { ISD::TRUNCATE,    MVT::v4i16, MVT::v4i64,  4 },
     { ISD::TRUNCATE,    MVT::v4i32, MVT::v4i64,  4 },
+    { ISD::TRUNCATE,    MVT::v8i8,  MVT::v8i64, 11 },
+    { ISD::TRUNCATE,    MVT::v8i16, MVT::v8i64,  9 },
     { ISD::TRUNCATE,    MVT::v8i32, MVT::v8i64,  9 },
+    { ISD::TRUNCATE,    MVT::v16i8, MVT::v16i64, 11 },
 
     { ISD::SINT_TO_FP,  MVT::v4f32, MVT::v4i1,  3 },
     { ISD::SINT_TO_FP,  MVT::v4f64, MVT::v4i1,  3 },
@@ -1566,6 +1569,7 @@ int X86TTIImpl::getCastInstrCost(unsigned Opcode, Type *Dst, Type *Src,
     { ISD::TRUNCATE,    MVT::v8i8,   MVT::v8i32,  3 },
     { ISD::TRUNCATE,    MVT::v8i16,  MVT::v8i32,  3 },
     { ISD::TRUNCATE,    MVT::v16i16, MVT::v16i32, 6 },
+    { ISD::TRUNCATE,    MVT::v2i8,   MVT::v2i64,  1 }, // PSHUFB
 
     { ISD::UINT_TO_FP,  MVT::f64,    MVT::i64,    4 },
   };
@@ -1628,15 +1632,21 @@ int X86TTIImpl::getCastInstrCost(unsigned Opcode, Type *Dst, Type *Src,
     { ISD::ZERO_EXTEND, MVT::v4i64,  MVT::v4i32,  3 },
     { ISD::SIGN_EXTEND, MVT::v4i64,  MVT::v4i32,  5 },
 
+    { ISD::TRUNCATE,    MVT::v2i8,   MVT::v2i16,  2 }, // PAND+PACKUSWB
     { ISD::TRUNCATE,    MVT::v4i8,   MVT::v4i16,  4 },
     { ISD::TRUNCATE,    MVT::v8i8,   MVT::v8i16,  2 },
     { ISD::TRUNCATE,    MVT::v16i8,  MVT::v16i16, 3 },
+    { ISD::TRUNCATE,    MVT::v2i8,   MVT::v2i32,  3 }, // PAND+3*PACKUSWB
+    { ISD::TRUNCATE,    MVT::v2i16,  MVT::v2i32,  1 },
     { ISD::TRUNCATE,    MVT::v4i8,   MVT::v4i32,  3 },
     { ISD::TRUNCATE,    MVT::v4i16,  MVT::v4i32,  3 },
     { ISD::TRUNCATE,    MVT::v8i8,   MVT::v8i32,  4 },
     { ISD::TRUNCATE,    MVT::v16i8,  MVT::v16i32, 7 },
     { ISD::TRUNCATE,    MVT::v8i16,  MVT::v8i32,  5 },
     { ISD::TRUNCATE,    MVT::v16i16, MVT::v16i32, 10 },
+    { ISD::TRUNCATE,    MVT::v2i8,   MVT::v2i64,  4 }, // PAND+3*PACKUSWB
+    { ISD::TRUNCATE,    MVT::v2i16,  MVT::v2i64,  2 }, // PSHUFD+PSHUFLW
+    { ISD::TRUNCATE,    MVT::v2i32,  MVT::v2i64,  1 }, // PSHUFD
   };
 
   std::pair<int, MVT> LTSrc = TLI->getTypeLegalizationCost(DL, Src);
@@ -1787,6 +1797,11 @@ int X86TTIImpl::getCmpSelInstrCost(unsigned Opcode, Type *ValTy, Type *CondTy,
     }
   }
 
+  static const CostTblEntry SLMCostTbl[] = {
+    // slm pcmpeq/pcmpgt throughput is 2
+    { ISD::SETCC,   MVT::v2i64,   2 },
+  };
+
   static const CostTblEntry AVX512BWCostTbl[] = {
     { ISD::SETCC,   MVT::v32i16,  1 },
     { ISD::SETCC,   MVT::v64i8,   1 },
@@ -1872,6 +1887,10 @@ int X86TTIImpl::getCmpSelInstrCost(unsigned Opcode, Type *ValTy, Type *CondTy,
 
     { ISD::SELECT,  MVT::v4f32,   3 }, // andps + andnps + orps
   };
+
+  if (ST->isSLM())
+    if (const auto *Entry = CostTableLookup(SLMCostTbl, ISD, MTy))
+      return LT.first * (ExtraCost + Entry->Cost);
 
   if (ST->hasBWI())
     if (const auto *Entry = CostTableLookup(AVX512BWCostTbl, ISD, MTy))

@@ -425,7 +425,8 @@ namespace llvm {
       // Tests Types Of a FP Values for scalar types.
       VFPCLASSS,
 
-      // Broadcast scalar to vector.
+      // Broadcast (splat) scalar or element 0 of a vector. If the operand is
+      // a vector, this node may change the vector length as part of the splat.
       VBROADCAST,
       // Broadcast mask to vector.
       VBROADCASTM,
@@ -1103,7 +1104,7 @@ namespace llvm {
     bool shouldConvertConstantLoadToIntImm(const APInt &Imm,
                                            Type *Ty) const override;
 
-    bool reduceSelectOfFPConstantLoads(bool IsFPSetCC) const override;
+    bool reduceSelectOfFPConstantLoads(EVT CmpOpVT) const override;
 
     bool convertSelectOfConstantsToMath(EVT VT) const override;
 
@@ -1202,6 +1203,10 @@ namespace llvm {
     unsigned getNumRegistersForCallingConv(LLVMContext &Context,
                                            CallingConv::ID CC,
                                            EVT VT) const override;
+
+    unsigned getVectorTypeBreakdownForCallingConv(
+        LLVMContext &Context, CallingConv::ID CC, EVT VT, EVT &IntermediateVT,
+        unsigned &NumIntermediates, MVT &RegisterVT) const override;
 
     bool isIntDivCheap(EVT VT, AttributeList Attr) const override;
 
@@ -1342,6 +1347,12 @@ namespace llvm {
     SDValue LowerGC_TRANSITION_START(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerGC_TRANSITION_END(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerINTRINSIC_WO_CHAIN(SDValue Op, SelectionDAG &DAG) const;
+    SDValue lowerFaddFsub(SDValue Op, SelectionDAG &DAG) const;
+    SDValue LowerFP_EXTEND(SDValue Op, SelectionDAG &DAG) const;
+    SDValue LowerFP_ROUND(SDValue Op, SelectionDAG &DAG) const;
+
+    SDValue LowerF128Call(SDValue Op, SelectionDAG &DAG,
+                          RTLIB::Libcall Call) const;
 
     SDValue
     LowerFormalArguments(SDValue Chain, CallingConv::ID CallConv, bool isVarArg,

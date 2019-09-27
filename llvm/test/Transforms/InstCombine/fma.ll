@@ -445,6 +445,70 @@ entry:
   ret <2 x double> %res
 }
 
+; We do not fold constant multiplies in FMAs, as they could require rounding, unless either constant is 0.0 or 1.0.
+define <2 x double> @fma_const_fmul(<2 x double> %b) {
+; CHECK-LABEL: @fma_const_fmul(
+; CHECK-NEXT:  entry:
+; CHECK-NEXT:    [[RES:%.*]] = call nnan nsz <2 x double> @llvm.fma.v2f64(<2 x double> <double 0x4131233302898702, double 0x40C387800000D6C0>, <2 x double> <double 1.291820e-08, double 9.123000e-06>, <2 x double> [[B:%.*]])
+; CHECK-NEXT:    ret <2 x double> [[RES]]
+;
+entry:
+  %res = call nnan nsz <2 x double> @llvm.fma.v2f64(<2 x double> <double 1123123.0099110012314, double 9999.0000001>, <2 x double> <double 0.0000000129182, double 0.000009123>, <2 x double> %b)
+  ret <2 x double> %res
+}
+
+define <2 x double> @fma_const_fmul_zero(<2 x double> %b) {
+; CHECK-LABEL: @fma_const_fmul_zero(
+; CHECK-NEXT:  entry:
+; CHECK-NEXT:    ret <2 x double> [[B:%.*]]
+;
+entry:
+  %res = call nnan nsz <2 x double> @llvm.fma.v2f64(<2 x double> <double 0.0, double 0.0>, <2 x double> <double 1123123.0099110012314, double 9999.0000001>, <2 x double> %b)
+  ret <2 x double> %res
+}
+
+define <2 x double> @fma_const_fmul_zero2(<2 x double> %b) {
+; CHECK-LABEL: @fma_const_fmul_zero2(
+; CHECK-NEXT:  entry:
+; CHECK-NEXT:    ret <2 x double> [[B:%.*]]
+;
+entry:
+  %res = call nnan nsz <2 x double> @llvm.fma.v2f64(<2 x double> <double 1123123.0099110012314, double 9999.0000001>, <2 x double> <double 0.0, double 0.0>, <2 x double> %b)
+  ret <2 x double> %res
+}
+
+define <2 x double> @fma_const_fmul_one(<2 x double> %b) {
+; CHECK-LABEL: @fma_const_fmul_one(
+; CHECK-NEXT:  entry:
+; CHECK-NEXT:    [[RES:%.*]] = fadd nnan nsz <2 x double> [[B:%.*]], <double 0x4131233302898702, double 0x40C387800000D6C0>
+; CHECK-NEXT:    ret <2 x double> [[RES]]
+;
+entry:
+  %res = call nnan nsz <2 x double> @llvm.fma.v2f64(<2 x double> <double 1.0, double 1.0>, <2 x double> <double 1123123.0099110012314, double 9999.0000001>, <2 x double> %b)
+  ret <2 x double> %res
+}
+
+define <2 x double> @fma_const_fmul_one2(<2 x double> %b) {
+; CHECK-LABEL: @fma_const_fmul_one2(
+; CHECK-NEXT:  entry:
+; CHECK-NEXT:    [[RES:%.*]] = fadd nnan nsz <2 x double> [[B:%.*]], <double 0x4131233302898702, double 0x40C387800000D6C0>
+; CHECK-NEXT:    ret <2 x double> [[RES]]
+;
+entry:
+  %res = call nnan nsz <2 x double> @llvm.fma.v2f64(<2 x double> <double 1123123.0099110012314, double 9999.0000001>, <2 x double> <double 1.0, double 1.0>, <2 x double> %b)
+  ret <2 x double> %res
+}
+
+define <2 x double> @fmuladd_const_fmul(<2 x double> %b) {
+; CHECK-LABEL: @fmuladd_const_fmul(
+; CHECK-NEXT:  entry:
+; CHECK-NEXT:    [[RES:%.*]] = fadd nnan nsz <2 x double> [[B:%.*]], <double 0x3F8DB6C076AD949B, double 0x3FB75A405B6E6D69>
+; CHECK-NEXT:    ret <2 x double> [[RES]]
+;
+entry:
+  %res = call nnan nsz <2 x double> @llvm.fmuladd.v2f64(<2 x double> <double 1123123.0099110012314, double 9999.0000001>, <2 x double> <double 0.0000000129182, double 0.000009123>, <2 x double> %b)
+  ret <2 x double> %res
+}
 
 declare <2 x double> @llvm.fma.v2f64(<2 x double>, <2 x double>, <2 x double>)
 declare <2 x double> @llvm.sqrt.v2f64(<2 x double>)

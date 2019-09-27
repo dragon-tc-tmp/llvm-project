@@ -366,12 +366,12 @@ AMDGPULegalizerInfo::AMDGPULegalizerInfo(const GCNSubtarget &ST_,
   getActionDefinitionsBuilder({G_FMINIMUM, G_FMAXIMUM}).lower();
 
   if (ST.has16BitInsts()) {
-    getActionDefinitionsBuilder(G_FSQRT)
+    getActionDefinitionsBuilder({G_FSQRT, G_FFLOOR})
       .legalFor({S32, S64, S16})
       .scalarize(0)
       .clampScalar(0, S16, S64);
   } else {
-    getActionDefinitionsBuilder(G_FSQRT)
+    getActionDefinitionsBuilder({G_FSQRT, G_FFLOOR})
       .legalFor({S32, S64})
       .scalarize(0)
       .clampScalar(0, S32, S64);
@@ -397,6 +397,15 @@ AMDGPULegalizerInfo::AMDGPULegalizerInfo(const GCNSubtarget &ST_,
       .scalarize(0)
       .clampScalar(0, S32, S64);
 
+  // Whether this is legal depends on the floating point mode for the function.
+  auto &FMad = getActionDefinitionsBuilder(G_FMAD);
+  if (ST.hasMadF16())
+    FMad.customFor({S32, S16});
+  else
+    FMad.customFor({S32});
+  FMad.scalarize(0)
+      .lower();
+
   getActionDefinitionsBuilder({G_SEXT, G_ZEXT, G_ANYEXT})
     .legalFor({{S64, S32}, {S32, S16}, {S64, S16},
                {S32, S1}, {S64, S1}, {S16, S1},
@@ -406,14 +415,15 @@ AMDGPULegalizerInfo::AMDGPULegalizerInfo(const GCNSubtarget &ST_,
                {S32, S8}, {S128, S32}, {S128, S64}, {S32, LLT::scalar(24)}})
     .scalarize(0);
 
+  // TODO: Legal for s1->s64, requires split for VALU.
   getActionDefinitionsBuilder({G_SITOFP, G_UITOFP})
-    .legalFor({{S32, S32}, {S64, S32}})
+    .legalFor({{S32, S32}, {S64, S32}, {S16, S32}, {S32, S1}, {S16, S1}})
     .lowerFor({{S32, S64}})
     .customFor({{S64, S64}})
     .scalarize(0);
 
   getActionDefinitionsBuilder({G_FPTOSI, G_FPTOUI})
-    .legalFor({{S32, S32}, {S32, S64}})
+    .legalFor({{S32, S32}, {S32, S64}, {S32, S16}})
     .scalarize(0);
 
   getActionDefinitionsBuilder(G_INTRINSIC_ROUND)
@@ -1050,6 +1060,8 @@ bool AMDGPULegalizerInfo::legalizeCustom(MachineInstr &MI,
     return legalizeGlobalValue(MI, MRI, B);
   case TargetOpcode::G_LOAD:
     return legalizeLoad(MI, MRI, B, Observer);
+  case TargetOpcode::G_FMAD:
+    return legalizeFMad(MI, MRI, B);
   default:
     return false;
   }
@@ -1546,6 +1558,27 @@ bool AMDGPULegalizerInfo::legalizeLoad(
   return true;
 }
 
+bool AMDGPULegalizerInfo::legalizeFMad(
+  MachineInstr &MI, MachineRegisterInfo &MRI,
+  MachineIRBuilder &B) const {
+  LLT Ty = MRI.getType(MI.getOperand(0).getReg());
+  assert(Ty.isScalar());
+
+  // TODO: Always legal with future ftz flag.
+  if (Ty == LLT::scalar(32) && !ST.hasFP32Denormals())
+    return true;
+  if (Ty == LLT::scalar(16) && !ST.hasFP16Denormals())
+    return true;
+
+  MachineFunction &MF = B.getMF();
+
+  MachineIRBuilder HelperBuilder(MI);
+  GISelObserverWrapper DummyObserver;
+  LegalizerHelper Helper(MF, DummyObserver, HelperBuilder);
+  HelperBuilder.setMBB(*MI.getParent());
+  return Helper.lowerFMad(MI) == LegalizerHelper::Legalized;
+}
+
 // Return the use branch instruction, otherwise null if the usage is invalid.
 static MachineInstr *verifyCFIntrinsic(MachineInstr &MI,
                                        MachineRegisterInfo &MRI) {
@@ -1718,6 +1751,62 @@ bool AMDGPULegalizerInfo::legalizeIsAddrSpace(MachineInstr &MI,
   return true;
 }
 
+/// Handle register layout difference for f16 images for some subtargets.
+Register AMDGPULegalizerInfo::handleD16VData(MachineIRBuilder &B,
+                                             MachineRegisterInfo &MRI,
+                                             Register Reg) const {
+  if (!ST.hasUnpackedD16VMem())
+    return Reg;
+
+  const LLT S16 = LLT::scalar(16);
+  const LLT S32 = LLT::scalar(32);
+  LLT StoreVT = MRI.getType(Reg);
+  assert(StoreVT.isVector() && StoreVT.getElementType() == S16);
+
+  auto Unmerge = B.buildUnmerge(S16, Reg);
+
+  SmallVector<Register, 4> WideRegs;
+  for (int I = 0, E = Unmerge->getNumOperands() - 1; I != E; ++I)
+    WideRegs.push_back(B.buildAnyExt(S32, Unmerge.getReg(I)).getReg(0));
+
+  int NumElts = StoreVT.getNumElements();
+
+  return B.buildBuildVector(LLT::vector(NumElts, S32), WideRegs).getReg(0);
+}
+
+bool AMDGPULegalizerInfo::legalizeRawBufferStore(MachineInstr &MI,
+                                                 MachineRegisterInfo &MRI,
+                                                 MachineIRBuilder &B,
+                                                 bool IsFormat) const {
+  // TODO: Reject f16 format on targets where unsupported.
+  Register VData = MI.getOperand(1).getReg();
+  LLT Ty = MRI.getType(VData);
+
+  B.setInstr(MI);
+
+  const LLT S32 = LLT::scalar(32);
+  const LLT S16 = LLT::scalar(16);
+
+  // Fixup illegal register types for i8 stores.
+  if (Ty == LLT::scalar(8) || Ty == S16) {
+    Register AnyExt = B.buildAnyExt(LLT::scalar(32), VData).getReg(0);
+    MI.getOperand(1).setReg(AnyExt);
+    return true;
+  }
+
+  if (Ty.isVector()) {
+    if (Ty.getElementType() == S16 && Ty.getNumElements() <= 4) {
+      if (IsFormat)
+        MI.getOperand(1).setReg(handleD16VData(B, MRI, VData));
+      return true;
+    }
+
+    return Ty.getElementType() == S32 && Ty.getNumElements() <= 4;
+  }
+
+  return Ty == S32;
+}
+
 bool AMDGPULegalizerInfo::legalizeIntrinsic(MachineInstr &MI,
                                             MachineRegisterInfo &MRI,
                                             MachineIRBuilder &B) const {
@@ -1810,6 +1899,10 @@ bool AMDGPULegalizerInfo::legalizeIntrinsic(MachineInstr &MI,
     MI.eraseFromParent();
     return true;
   }
+  case Intrinsic::amdgcn_raw_buffer_store:
+    return legalizeRawBufferStore(MI, MRI, B, false);
+  case Intrinsic::amdgcn_raw_buffer_store_format:
+    return legalizeRawBufferStore(MI, MRI, B, true);
   default:
     return true;
   }

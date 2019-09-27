@@ -398,17 +398,22 @@ void REPL::IOHandlerInputComplete(IOHandler &io_handler, std::string &code) {
 
           // Update our code on disk
           if (!m_repl_source_path.empty()) {
-            lldb_private::File file;
-            FileSystem::Instance().Open(file, FileSpec(m_repl_source_path),
+            auto file = FileSystem::Instance().Open(FileSpec(m_repl_source_path),
                                         File::eOpenOptionWrite |
                                             File::eOpenOptionTruncate |
                                             File::eOpenOptionCanCreate,
                                         lldb::eFilePermissionsFileDefault);
-            std::string code(m_code.CopyList());
-            code.append(1, '\n');
-            size_t bytes_written = code.size();
-            file.Write(code.c_str(), bytes_written);
-            file.Close();
+            if (file) {
+              std::string code(m_code.CopyList());
+              code.append(1, '\n');
+              size_t bytes_written = code.size();
+              file.get()->Write(code.c_str(), bytes_written);
+              file.get()->Close();
+            } else {
+              std::string message = llvm::toString(file.takeError());
+              error_sp->Printf("error: couldn't open %s: %s\n",
+                               m_repl_source_path.c_str(), message.c_str());
+            }
 
             // Now set the default file and line to the REPL source file
             m_target.GetSourceManager().SetDefaultFileAndLine(
@@ -453,7 +458,7 @@ void REPL::IOHandlerComplete(IOHandler &io_handler,
   }
 
   // Strip spaces from the line and see if we had only spaces
-  if (request.GetRawLineUntilCursor().trim().empty()) {
+  if (request.GetRawLine().trim().empty()) {
     // Only spaces on this line, so just indent
     request.AddCompletion(m_indent_str);
     return;
@@ -479,7 +484,7 @@ void REPL::IOHandlerComplete(IOHandler &io_handler,
   }
 
   current_code.append("\n");
-  current_code += request.GetRawLineUntilCursor();
+  current_code += request.GetRawLine();
 
   StringList matches;
   int result = CompleteCode(current_code, matches);

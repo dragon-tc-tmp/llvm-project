@@ -1070,6 +1070,8 @@ uptr GetPageSize() {
   int rv = internal_sysctl(mib, 2, &pz, &pzl, nullptr, 0);
   CHECK_EQ(rv, 0);
   return (uptr)pz;
+#elif SANITIZER_USE_GETAUXVAL
+  return getauxval(AT_PAGESZ);
 #else
   return sysconf(_SC_PAGESIZE);  // EXEC_PAGESIZE may not be trustworthy.
 #endif
